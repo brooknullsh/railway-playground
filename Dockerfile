@@ -1,8 +1,8 @@
 FROM rust:latest AS builder
 
 # Create a shell project.
-RUN cargo new --bin rust-playground --vcs none
-WORKDIR /rust-playground
+RUN cargo new --bin railway-playground --vcs none
+WORKDIR /railway-playground
 
 # Copy the manifest files (Cargo.toml & Cargo.lock).
 COPY ./Cargo* .
@@ -15,13 +15,13 @@ RUN rm ./src/*.rs
 COPY ./src ./src
 
 # Remove incremental artifacts and rebuild.
-RUN rm -f ./target/release/deps/rust_playground*
+RUN rm -f ./target/release/deps/railway_playground*
 RUN cargo build -r
 
 # Lightweight final base image.
 FROM debian:bookworm-slim
 
 # Copy only the executable from the rust image.
-COPY --from=builder /rust-playground/target/release/rust-playground /rust-playground
+COPY --from=builder /railway-playground/target/release/railway-playground /railway-playground
 
-CMD ["/rust-playground"]
+CMD ["/railway-playground"]
