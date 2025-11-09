@@ -1,6 +1,21 @@
 services:
+  postgres:
+    image: postgres:14-alpine
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=playground
+    volumes:
+      # SQL to run when DB is initialised & open for connections. Only runs if
+      # the top-level volume is empty.
+      - ./setup/seed.sql:/docker-entrypoint-initdb.d/init_seed.sql
+
   playground:
     build:
       dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgres://admin:password@postgres:5432/playground
     ports:
-      - 3000:3000
+      - 8080:8080
