@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "start": "vite start --host 0.0.0.0",
+    "start": "bun run build/index.js",
     "preview": "vite preview --host --open",
     "dev": "vite dev --host --open"
   },
