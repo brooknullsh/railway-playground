@@ -48,7 +48,7 @@ async fn index(State(pool): State<Arc<PgPool>>) -> impl IntoResponse {
     .await
     .inspect_err(|err| log!(ERROR, "GET / {err}"))
   else {
-    return StatusCode::NOT_FOUND.into_response();
+    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
   };
 
   log!("Users: {}", users.len());
@@ -83,7 +83,7 @@ async fn main() {
     log!(ABORT, "Binding to: {host}");
   };
 
-  log!(INFO, "Starting at: {host}...");
+  log!(INFO, "Starting at: {host}");
   if let Err(err) = axum::serve(listener, app).await {
     log!(ABORT, "Starting server: {}", err);
   }
