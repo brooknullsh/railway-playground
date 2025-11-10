@@ -1,4 +1,4 @@
-use std::{env, sync::Arc};
+use std::{env, process, sync::Arc};
 
 use axum::{
   Json, Router,
@@ -10,24 +10,8 @@ use axum::{
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions, prelude::FromRow};
 use tokio::net::TcpListener;
-
-const CACHE_HEADER: HeaderValue = HeaderValue::from_static("private, max-age=3600");
-
-macro_rules! log {
-  (INFO, $($txt:tt)*) => {
-    println!("[\x1b[1m\x1b[32mINFO \x1b[0m] {}", format!($($txt)*))
-  };
-  (ERROR, $($txt:tt)*) => {
-    eprintln!("[\x1b[1m\x1b[31mERROR\x1b[0m] {}", format!($($txt)*))
-  };
-  (ABORT, $($txt:tt)*) => {
-    eprintln!("[\x1b[1m\x1b[31mERROR\x1b[0m] {}", format!($($txt)*));
-    std::process::exit(1)
-  };
-  ($($txt:tt)*) => {
-    println!("[\x1b[1m\x1b[34mDEBUG\x1b[0m] {}", format!($($txt)*))
-  };
-}
+use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 #[derive(Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -40,51 +24,63 @@ struct User {
   first_name: String,
 }
 
+/// Basic route handler to query all users from the database. NOTE: It's so
+/// basic that there's no auth, rate limiting etc.
 async fn index(State(pool): State<Arc<PgPool>>) -> impl IntoResponse {
-  log!(INFO, "GET /");
-
   let Ok(users) = sqlx::query_as::<_, User>("SELECT * FROM users")
     .fetch_all(&*pool)
     .await
-    .inspect_err(|err| log!(ERROR, "GET / {err}"))
   else {
     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
   };
 
-  log!("Users: {}", users.len());
   let mut response = (StatusCode::OK, Json(users)).into_response();
-  response.headers_mut().insert("cache-control", CACHE_HEADER);
+  response.headers_mut().insert(
+    "cache-control",
+    HeaderValue::from_static("private, max-age=3600"),
+  );
 
   response
 }
 
+/// Build a [`TcpListener`] and [`Router`] with tracing, database pool and route
+/// handlers. NOTE: All errors are bubbled up to be logged.
+async fn startup() -> anyhow::Result<(TcpListener, Router)> {
+  let tracing_layer = TraceLayer::new_for_http()
+    .on_response(DefaultOnResponse::new().level(Level::INFO))
+    .on_request(DefaultOnRequest::new().level(Level::INFO));
+
+  let database_url = env::var("DATABASE_URL")?;
+  let pool = PgPoolOptions::new().connect(&database_url).await?;
+
+  let app = Router::new()
+    .route("/", get(index))
+    .layer(tracing_layer)
+    .with_state(Arc::new(pool));
+
+  let host = format!("0.0.0.0:{}", env::var("PORT").unwrap_or("8080".into()));
+  let listener = TcpListener::bind(&host).await?;
+
+  tracing::info!("Starting at: {host}");
+  Ok((listener, app))
+}
+
 #[tokio::main]
 async fn main() {
-  let host = env::var("PORT")
-    .map(|var| format!("0.0.0.0:{}", var))
-    .unwrap_or_else(|_| "0.0.0.0:8080".into());
+  tracing_subscriber::fmt()
+    .with_max_level(Level::DEBUG)
+    .with_target(false)
+    .compact()
+    .init();
 
-  let Ok(database) = env::var("DATABASE_URL") else {
-    log!(ABORT, "DATABASE_URL not set");
-  };
-
-  let Ok(pool) = PgPoolOptions::new()
-    .connect(&database)
+  let Ok((listener, app)) = startup()
     .await
-    .inspect_err(|err| log!(ERROR, "Connecting to database: {err}"))
+    .inspect_err(|err| tracing::error!("{err:#}"))
   else {
-    return;
+    process::exit(1);
   };
 
-  let shared_pool = Arc::new(pool);
-  let app = Router::new().route("/", get(index)).with_state(shared_pool);
-
-  let Ok(listener) = TcpListener::bind(&host).await else {
-    log!(ABORT, "Binding to: {host}");
-  };
-
-  log!(INFO, "Starting at: {host}");
-  if let Err(err) = axum::serve(listener, app).await {
-    log!(ABORT, "Starting server: {}", err);
-  }
+  // On error, the TCP listener sleeps (for a second) without returning an error
+  // so we unwrap the result regardless.
+  axum::serve(listener, app).await.unwrap();
 }
