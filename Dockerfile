@@ -1,27 +1,20 @@
 FROM rust:latest AS builder
+WORKDIR /server
 
-# Create a shell project.
-RUN cargo new --bin railway-playground --vcs none
-WORKDIR /railway-playground
+# Create a new project shell.
+RUN cargo init --bin --vcs none
 
-# Copy the manifest files (Cargo.toml & Cargo.lock).
-COPY ./Cargo* .
+# Overwrite configuration and source files.
+COPY Cargo* .
+COPY src    ./src
 
-# Build dependencies and remove shell source files.
-RUN cargo build -r
-RUN rm ./src/*.rs
-
-# Copy working source files into shell project.
-COPY ./src ./src
-
-# Remove incremental artifacts and rebuild.
-RUN rm -f ./target/release/deps/railway_playground*
+# Generate a release build using the generated/copied files.
 RUN cargo build -r
 
-# Lightweight final base image.
 FROM debian:bookworm-slim
 
-# Copy only the executable from the rust image.
-COPY --from=builder /railway-playground/target/release/railway-playground /railway-playground
+# NOTE: Binary name is defined within the copied Cargo.toml file, rather than
+# the generated shell.
+COPY --from=builder /server/target/release/railway-playground /railway-playground
 
 CMD ["/railway-playground"]

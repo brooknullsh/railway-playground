@@ -1,14 +1,18 @@
 FROM oven/bun:latest AS builder
+WORKDIR /client
 
-WORKDIR /usr/src/app
+# Copy source files for building the client.
+COPY package.json     .
+COPY vite.config.ts   .
+COPY svelte.config.js .
+COPY src              ./src
 
-COPY . .
-
-RUN bun install --frozen-lockfile --verbose
+# Generate build output after installing linux dependencies.
+RUN bun install --verbose
 RUN bun run build
 
 FROM oven/bun:distroless
 
-COPY --from=builder /usr/src/app/build ./build
+COPY --from=builder /client/build /build
 
-CMD ["build/index.js"]
+CMD ["/build/index.js"]
