@@ -10,7 +10,7 @@ services:
     volumes:
       # SQL to run when DB is initialised & open for connections. Only runs if
       # the top-level volume is empty.
-      - ../setup/seed.sql:/docker-entrypoint-initdb.d/init_seed.sql
+      - ./seed.sql:/docker-entrypoint-initdb.d/init_seed.sql
 
   server:
     depends_on:
