@@ -10,7 +10,7 @@ services:
     volumes:
       # SQL to run when DB is initialised & open for connections. Only runs if
       # the top-level volume is empty.
-      - ./seed.sql:/docker-entrypoint-initdb.d/init_seed.sql
+      - ./setup/seed.sql:/docker-entrypoint-initdb.d/init_seed.sql
 
   server:
     depends_on:
@@ -24,7 +24,8 @@ services:
       - DATABASE_URL=postgres://admin:password@database:5432/playground
     volumes:
       # Source files for hot-reloading.
-      - ../src:/server-local/src
+      - ../main.go:/server-local/main.go
+      - ../internal:/server-local/internal
 
   client:
     restart: on-failure

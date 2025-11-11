@@ -9,8 +9,8 @@ COPY client/src              ./src
 
 RUN bun install --verbose
 
-#  3000: SvelteKit development.
-# 24678: Vite HMR.
+# 3000  : SvelteKit
+# 24678 : Vite
 EXPOSE 3000
 EXPOSE 24678
 

@@ -1,20 +1,14 @@
-FROM rust:latest AS builder
+FROM golang:latest AS builder
 WORKDIR /server
 
-# Create a new project shell.
-RUN cargo init --bin --vcs none
+# Copy source files for building the binary.
+COPY go.mod go.sum main.go ./
+COPY internal/ ./internal
 
-# Overwrite configuration and source files.
-COPY Cargo* .
-COPY src    ./src
+RUN CGO_ENABLED=0 GOOS=linux go build -o railway-playground
 
-# Generate a release build using the generated/copied files.
-RUN cargo build -r
+FROM scratch
 
-FROM debian:bookworm-slim
-
-# NOTE: Binary name is defined within the copied Cargo.toml file, rather than
-# the generated shell.
-COPY --from=builder /server/target/release/railway-playground /railway-playground
+COPY --from=builder /server/railway-playground .
 
 CMD ["/railway-playground"]
