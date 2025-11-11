@@ -46,12 +46,12 @@ async fn index(State(pool): State<Arc<PgPool>>) -> impl IntoResponse {
 /// Build a [`TcpListener`] and [`Router`] with tracing, database pool and route
 /// handlers. NOTE: All errors are bubbled up to be logged.
 async fn startup() -> anyhow::Result<(TcpListener, Router)> {
+  let database_url = env::var("DATABASE_URL")?;
+  let pool = PgPoolOptions::new().connect(&database_url).await?;
+
   let tracing_layer = TraceLayer::new_for_http()
     .on_response(DefaultOnResponse::new().level(Level::INFO))
     .on_request(DefaultOnRequest::new().level(Level::INFO));
-
-  let database_url = env::var("DATABASE_URL")?;
-  let pool = PgPoolOptions::new().connect(&database_url).await?;
 
   let app = Router::new()
     .route("/", get(index))
