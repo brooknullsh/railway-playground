@@ -3,6 +3,7 @@ package handler
 import (
   "log/slog"
   "net/http"
+  "time"
 
   "github.com/brooknullsh/railway-playground/internal/store"
   "github.com/labstack/echo/v4"
@@ -21,34 +22,43 @@ func (h *AuthHandler) Login(ctx echo.Context) error {
 
   var request LoginRequest
   if err := ctx.Bind(&request); err != nil {
-    slog.Error("[BINDING] " + err.Error())
-    return ctx.NoContent(http.StatusBadRequest)
+    return WarnAndRespond(ctx, "[LOGIN][BINDING]", err, http.StatusBadRequest)
   }
 
   user, err := h.store.GetUserByName(reqCtx, request.FirstName)
   if err != nil {
-    slog.Warn("[LOGIN] " + err.Error())
-    return ctx.NoContent(http.StatusBadRequest)
+    return WarnAndRespond(ctx, "", err, http.StatusBadRequest)
   }
 
   claims := CustomClaims{FirstName: user.FirstName}
 
   token, err := claims.GenerateToken()
   if err != nil {
-    slog.Error(err.Error())
-    return ctx.NoContent(http.StatusInternalServerError)
+    return WarnAndRespond(ctx, "", err, http.StatusInternalServerError)
   }
 
-  slog.Info("authenticated", "user", user.FirstName)
+  tokenCookie := http.Cookie{
+    Name:     "jwt",
+    Value:    token,
+    HttpOnly: true,
+    Secure:   true,
+    Path:     "/",
+    Expires:  time.Now().Add(jwtDuration),
+  }
+
+  ctx.SetCookie(&tokenCookie)
+  slog.Info("logged in", "name", user.FirstName)
+
+  // TODO: May just need token stored in HTTP-only cookie
   return ctx.JSON(http.StatusOK, map[string]string{"token": token})
 }
 
-func (h *AuthHandler) Test(ctx echo.Context) error {
-  firstName, err := DecodeToken(ctx)
+func (h *AuthHandler) Protected(ctx echo.Context) error {
+  claims, err := DecodeToken(ctx)
   if err != nil {
-    slog.Error(err.Error())
-    return ctx.NoContent(http.StatusUnauthorized)
+    return WarnAndRespond(ctx, "", err, http.StatusUnauthorized)
   }
 
-  return ctx.String(http.StatusOK, firstName.FirstName)
+  slog.Info("decoded JWT", "name", claims.FirstName)
+  return ctx.String(http.StatusOK, claims.FirstName)
 }

@@ -2,11 +2,15 @@ package handler
 
 import (
   "fmt"
+  "log/slog"
+  "os"
   "time"
 
   "github.com/golang-jwt/jwt/v5"
   "github.com/labstack/echo/v4"
 )
+
+var jwtDuration = time.Hour * 24
 
 type CustomClaims struct {
   FirstName string `json:"firstName"`
@@ -14,9 +18,10 @@ type CustomClaims struct {
 
 func (c *CustomClaims) GenerateToken() (string, error) {
   now := time.Now()
-  exp := now.Add(time.Hour * 24)
+  exp := now.Add(jwtDuration)
 
   token := jwt.New(jwt.SigningMethodHS256)
+  // Ignoring the error for parsing claims on a fresh token.
   claims := token.Claims.(jwt.MapClaims)
 
   claims["firstName"] = c.FirstName
@@ -24,25 +29,35 @@ func (c *CustomClaims) GenerateToken() (string, error) {
   claims["iat"] = jwt.NewNumericDate(now)
   claims["exp"] = jwt.NewNumericDate(exp)
 
-  tokenString, err := token.SignedString([]byte("SECRET"))
-  if err != nil {
-    return "", fmt.Errorf("[SIGNING] %w", err)
-  }
-
-  return tokenString, nil
+  secret := SecretKeyBytes()
+  return token.SignedString(secret)
 }
 
 func DecodeToken(ctx echo.Context) (*CustomClaims, error) {
+  tokenCookie, _ := ctx.Cookie("jwt")
+  slog.Info(tokenCookie.Value)
+
   token, exists := ctx.Get("user").(*jwt.Token)
   if !exists {
-    return nil, fmt.Errorf("[GET] missing token")
+    return nil, fmt.Errorf("[DECODE_TOKEN] missing token for < %s >", ctx.Request().URL)
   }
 
   claims, exists := token.Claims.(jwt.MapClaims)
   if !exists {
-    return nil, fmt.Errorf("[CONVERSION] invalid token")
+    return nil, fmt.Errorf("[DECODE_TOKEN] invalid token format")
   }
 
-  customClaims := CustomClaims{FirstName: claims["firstName"].(string)}
-  return &customClaims, nil
+  return &CustomClaims{FirstName: claims["firstName"].(string)}, nil
+}
+
+func SecretKeyBytes() []byte {
+  if envSecret, exists := os.LookupEnv("JWT_SECRET"); exists {
+    return []byte(envSecret)
+  } else {
+    slog.Error("[SECRET] JWT_SECRET is unset")
+    os.Exit(1)
+  }
+
+  // Unreachable due to the panic call above.
+  return nil
 }

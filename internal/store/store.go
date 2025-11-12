@@ -18,12 +18,12 @@ func NewAndConnect() (*Store, error) {
 
   url, exists := os.LookupEnv("DATABASE_URL")
   if !exists {
-    return nil, fmt.Errorf("[ENV] DATABASE_URL unset")
+    return nil, fmt.Errorf("[STORE] DATABASE_URL is unset")
   }
 
   config, err := pgxpool.ParseConfig(url)
   if err != nil {
-    return nil, fmt.Errorf("[PARSING] %w", err)
+    return nil, fmt.Errorf("[STORE] building pool | %w", err)
   }
 
   config.MaxConns = 20
@@ -31,11 +31,11 @@ func NewAndConnect() (*Store, error) {
 
   database, err := pgxpool.NewWithConfig(ctx, config)
   if err != nil {
-    return nil, fmt.Errorf("[CREATING] %w", err)
+    return nil, fmt.Errorf("[STORE] creating pool | %w", err)
   }
 
   if err := database.Ping(ctx); err != nil {
-    return nil, fmt.Errorf("[PINGING] %w", err)
+    return nil, fmt.Errorf("[STORE] pinging database | %w", err)
   }
 
   return &Store{database}, nil
@@ -51,14 +51,11 @@ type User struct {
 }
 
 func (s *Store) GetUserByName(ctx context.Context, firstName string) (*User, error) {
-  row, err := s.Pool.Query(ctx, "SELECT * FROM users WHERE first_name = $1", firstName)
-  if err != nil {
-    return nil, fmt.Errorf("[QUERYING] %w", err)
-  }
+  row, _ := s.Pool.Query(ctx, "SELECT * FROM users WHERE first_name = $1", firstName)
 
   user, err := pgx.CollectOneRow(row, pgx.RowToStructByName[User])
   if err != nil {
-    return nil, fmt.Errorf("[MAPPING] %w", err)
+    return nil, fmt.Errorf("[GUBN] querying for < %s > | %w", firstName, err)
   }
 
   return &user, nil

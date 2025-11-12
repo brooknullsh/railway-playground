@@ -13,37 +13,45 @@ import (
 
 // See: https://github.com/dunamismax/go-web-server
 
-func main() {
+func abort(err error) {
+  errorMsg := err.Error()
+  slog.Error(errorMsg)
+
+  os.Exit(1)
+}
+
+func setup() (storage *store.Store, app *echo.Echo, port string) {
   options := slog.HandlerOptions{Level: slog.LevelDebug}
   textHandler := slog.NewTextHandler(os.Stdout, &options)
 
-  // NOTE: Can't use the default handler with a custom level. So we're left to
-  // customising the text handler.
+  // Can't use the default handler when specifying a custom level.
   logger := slog.New(textHandler)
   slog.SetDefault(logger)
 
-  store, err := store.NewAndConnect()
+  storage, err := store.NewAndConnect()
   if err != nil {
-    slog.Error("[STORE] " + err.Error())
-    os.Exit(1)
+    abort(err)
   }
 
-  defer store.Pool.Close()
-  app := echo.New()
-
-  handlers := handler.NewWithState(store)
+  app = echo.New()
+  handlers := handler.NewWithState(storage)
   handlers.RegisterRoutes(app)
 
-  var port string
-  if value, ok := os.LookupEnv("PORT"); ok {
-    port = ":" + value
+  if envPort, exists := os.LookupEnv("PORT"); exists {
+    port = ":" + envPort
   } else {
     port = ":8080"
   }
 
+  return
+}
+
+func main() {
+  store, app, port := setup()
+  defer store.Pool.Close()
+
   slog.Info("starting server...", "port", port)
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {
-    slog.Error("[APP] " + err.Error())
-    os.Exit(1)
+    abort(err)
   }
 }
