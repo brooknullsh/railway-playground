@@ -1,10 +1,12 @@
 <script lang="ts">
-  import type { PageProps } from "./$types"
+  // import type { PageProps } from "./$types"
 
-  let { data }: PageProps = $props()
+  // let { data }: PageProps = $props()
 </script>
 
-{#await data.users}
+<p>Hello, world!</p>
+
+<!-- {#await data.users}
   Loading...
 {:then users}
   {#each users as user}
@@ -21,4 +23,4 @@
   {/each}
 {:catch error}
   <p class="text-red-400">Unable to retrieve users: {error.message}</p>
-{/await}
+{/await} -->

@@ -3,7 +3,7 @@ WORKDIR /server
 
 # Copy source files for building the binary.
 COPY go.mod go.sum main.go ./
-COPY internal/ ./internal
+COPY internal/             ./internal
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o railway-playground
 

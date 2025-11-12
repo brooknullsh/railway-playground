@@ -41,4 +41,7 @@ services:
       - SERVER_URL=http://server:8080
     volumes:
       # Source files for hot-reloading.
+      # NOTE: Generated types are shared within the .svelte-kit folder so that
+      # needs to also be mounted.
+      - ../client/.svelte-kit:/client-local/.svelte-kit
       - ../client/src:/client-local/src

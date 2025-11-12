@@ -1,7 +1,6 @@
 package main
 
 import (
-  "context"
   "errors"
   "log/slog"
   "net/http"
@@ -14,48 +13,37 @@ import (
 
 // See: https://github.com/dunamismax/go-web-server
 
-func initLogger() {
+func main() {
   options := slog.HandlerOptions{Level: slog.LevelDebug}
-  handler := slog.NewTextHandler(os.Stdout, &options)
+  textHandler := slog.NewTextHandler(os.Stdout, &options)
 
-  slog.SetDefault(slog.New(handler))
-}
+  // NOTE: Can't use the default handler with a custom level. So we're left to
+  // customising the text handler.
+  logger := slog.New(textHandler)
+  slog.SetDefault(logger)
 
-func initStore(ctx context.Context) *store.Store {
-  store, err := store.New(ctx, os.Getenv("DATABASE_URL"))
+  store, err := store.NewAndConnect()
   if err != nil {
-    slog.Error("[STORE]" + err.Error())
+    slog.Error("[STORE] " + err.Error())
     os.Exit(1)
   }
 
-  return store
-}
+  defer store.Pool.Close()
+  app := echo.New()
 
-func initApp(store *store.Store) (app *echo.Echo, port string) {
-  app = echo.New()
+  handlers := handler.NewWithState(store)
+  handlers.RegisterRoutes(app)
 
-  handlers := handler.New(store)
-  handlers.Register(app)
-
+  var port string
   if value, ok := os.LookupEnv("PORT"); ok {
     port = ":" + value
   } else {
     port = ":8080"
   }
 
-  return
-}
-
-func main() {
-  initLogger()
-  ctx := context.Background()
-
-  store := initStore(ctx)
-  defer store.Database.Close()
-
-  app, port := initApp(store)
+  slog.Info("starting server...", "port", port)
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {
-    slog.Error("[APP]" + err.Error())
+    slog.Error("[APP] " + err.Error())
     os.Exit(1)
   }
 }
