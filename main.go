@@ -24,23 +24,19 @@ func initLogger() {
 func initStore(ctx context.Context) *store.Store {
   store, err := store.New(ctx, os.Getenv("DATABASE_URL"))
   if err != nil {
-    slog.Error("creating store", "error", err)
+    slog.Error("[STORE]" + err.Error())
     os.Exit(1)
   }
 
   return store
 }
 
-func initApp(store *store.Store) *echo.Echo {
-  app := echo.New()
+func initApp(store *store.Store) (app *echo.Echo, port string) {
+  app = echo.New()
 
   handlers := handler.New(store)
   handlers.Register(app)
 
-  return app
-}
-
-func initPort() (port string) {
   if value, ok := os.LookupEnv("PORT"); ok {
     port = ":" + value
   } else {
@@ -57,11 +53,9 @@ func main() {
   store := initStore(ctx)
   defer store.Database.Close()
 
-  app := initApp(store)
-  port := initPort()
-
+  app, port := initApp(store)
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {
-    slog.Error("starting server", "error", err)
+    slog.Error("[APP]" + err.Error())
     os.Exit(1)
   }
 }

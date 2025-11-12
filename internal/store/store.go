@@ -14,7 +14,7 @@ type Store struct {
 func New(ctx context.Context, url string) (*Store, error) {
   config, err := pgxpool.ParseConfig(url)
   if err != nil {
-    return nil, fmt.Errorf("[parsing] %w", err)
+    return nil, fmt.Errorf("[PARSING] %w", err)
   }
 
   config.MaxConns = 20
@@ -22,11 +22,11 @@ func New(ctx context.Context, url string) (*Store, error) {
 
   database, err := pgxpool.NewWithConfig(ctx, config)
   if err != nil {
-    return nil, fmt.Errorf("[creating] %w", err)
+    return nil, fmt.Errorf("[CREATING] %w", err)
   }
 
   if err := database.Ping(ctx); err != nil {
-    return nil, fmt.Errorf("[pinging] %w", err)
+    return nil, fmt.Errorf("[PINGING] %w", err)
   }
 
   return &Store{database}, nil

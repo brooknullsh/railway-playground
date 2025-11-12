@@ -26,7 +26,7 @@ type User struct {
 func (h *IndexHandler) Root(ctx echo.Context) error {
   rows, err := h.store.Database.Query(context.Background(), "SELECT * FROM users")
   if err != nil {
-    slog.Error("[querying] %w", "error", err)
+    slog.Error("[QUERYING]" + err.Error())
     return ctx.NoContent(http.StatusInternalServerError)
   }
 
@@ -34,10 +34,9 @@ func (h *IndexHandler) Root(ctx echo.Context) error {
 
   users, err := pgx.CollectRows(rows, pgx.RowToStructByName[User])
   if err != nil {
-    slog.Error("[mapping] %w", "error", err)
+    slog.Error("[MAPPING]" + err.Error())
     return ctx.NoContent(http.StatusInternalServerError)
   }
 
-  slog.Info("%d user(s)", "users", len(users))
   return ctx.JSON(http.StatusOK, users)
 }
