@@ -14,31 +14,23 @@ import (
 // See: https://github.com/dunamismax/go-web-server
 
 func abort(err error) {
-  errorMsg := err.Error()
-  slog.Error(errorMsg)
+  text := err.Error()
+  slog.Error(text)
 
   os.Exit(1)
 }
 
-func setup() (storage *store.Store, app *echo.Echo, port string) {
+func setLogger() {
   options := slog.HandlerOptions{Level: slog.LevelDebug}
-  textHandler := slog.NewTextHandler(os.Stdout, &options)
+  overwrite := slog.NewTextHandler(os.Stdout, &options)
 
-  // Can't use the default handler when specifying a custom level.
-  logger := slog.New(textHandler)
+  logger := slog.New(overwrite)
   slog.SetDefault(logger)
+}
 
-  storage, err := store.NewAndConnect()
-  if err != nil {
-    abort(err)
-  }
-
-  app = echo.New()
-  handlers := handler.NewWithState(storage)
-  handlers.RegisterRoutes(app)
-
-  if envPort, exists := os.LookupEnv("PORT"); exists {
-    port = ":" + envPort
+func buildPort() (port string) {
+  if value, exists := os.LookupEnv("PORT"); exists {
+    port = ":" + value
   } else {
     port = ":8080"
   }
@@ -46,9 +38,24 @@ func setup() (storage *store.Store, app *echo.Echo, port string) {
   return
 }
 
+func setup() (*store.Store, *echo.Echo) {
+  store, err := store.NewAndConnect()
+  if err != nil {
+    abort(err)
+  }
+
+  app := echo.New()
+  handler.InitialiseWithState(app, store)
+
+  return store, app
+}
+
 func main() {
-  store, app, port := setup()
+  setLogger()
+
+  store, app := setup()
   defer store.Pool.Close()
+  port := buildPort()
 
   slog.Info("starting server...", "port", port)
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {

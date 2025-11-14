@@ -18,47 +18,49 @@ type LoginRequest struct {
 }
 
 func (h *AuthHandler) Login(ctx echo.Context) error {
-  reqCtx := ctx.Request().Context()
+  request := ctx.Request().Context()
 
-  var request LoginRequest
-  if err := ctx.Bind(&request); err != nil {
-    return WarnAndRespond(ctx, "[LOGIN][BINDING]", err, http.StatusBadRequest)
+  var body LoginRequest
+  if err := ctx.Bind(&body); err != nil {
+    slog.Error("invalid request body", "error", err)
+    return ctx.NoContent(http.StatusBadRequest)
   }
 
-  user, err := h.store.GetUserByName(reqCtx, request.FirstName)
+  user, err := h.store.GetUserByName(request, body.FirstName)
   if err != nil {
-    return WarnAndRespond(ctx, "", err, http.StatusBadRequest)
+    slog.Error("user query", "error", err)
+    return ctx.NoContent(http.StatusInternalServerError)
   }
 
   claims := CustomClaims{FirstName: user.FirstName}
-
   token, err := claims.GenerateToken()
   if err != nil {
-    return WarnAndRespond(ctx, "", err, http.StatusInternalServerError)
+    slog.Error("token generation", "error", err)
+    return ctx.NoContent(http.StatusInternalServerError)
   }
 
-  tokenCookie := http.Cookie{
+  cookie := http.Cookie{
     Name:     "jwt",
     Value:    token,
     HttpOnly: true,
     Secure:   true,
     Path:     "/",
-    Expires:  time.Now().Add(jwtDuration),
+    Expires:  time.Now().Add(lifespan),
   }
 
-  ctx.SetCookie(&tokenCookie)
+  ctx.SetCookie(&cookie)
   slog.Info("logged in", "name", user.FirstName)
 
-  // TODO: May just need token stored in HTTP-only cookie
-  return ctx.JSON(http.StatusOK, map[string]string{"token": token})
+  return ctx.NoContent(http.StatusOK)
 }
 
 func (h *AuthHandler) Protected(ctx echo.Context) error {
   claims, err := DecodeToken(ctx)
   if err != nil {
-    return WarnAndRespond(ctx, "", err, http.StatusUnauthorized)
+    slog.Error("token decoding", "error", err)
+    return ctx.NoContent(http.StatusInternalServerError)
   }
 
-  slog.Info("decoded JWT", "name", claims.FirstName)
+  slog.Info("decoded token", "name", claims.FirstName)
   return ctx.String(http.StatusOK, claims.FirstName)
 }

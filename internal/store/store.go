@@ -18,27 +18,27 @@ func NewAndConnect() (*Store, error) {
 
   url, exists := os.LookupEnv("DATABASE_URL")
   if !exists {
-    return nil, fmt.Errorf("[STORE] DATABASE_URL is unset")
+    return nil, fmt.Errorf("DATABASE_URL is unset")
   }
 
   config, err := pgxpool.ParseConfig(url)
   if err != nil {
-    return nil, fmt.Errorf("[STORE] building pool | %w", err)
+    return nil, fmt.Errorf("building pool: %w", err)
   }
 
   config.MaxConns = 20
   config.MinConns = 5
 
-  database, err := pgxpool.NewWithConfig(ctx, config)
+  pool, err := pgxpool.NewWithConfig(ctx, config)
   if err != nil {
-    return nil, fmt.Errorf("[STORE] creating pool | %w", err)
+    return nil, fmt.Errorf("creating pool: %w", err)
   }
 
-  if err := database.Ping(ctx); err != nil {
-    return nil, fmt.Errorf("[STORE] pinging database | %w", err)
+  if err := pool.Ping(ctx); err != nil {
+    return nil, fmt.Errorf("pinging database: %w", err)
   }
 
-  return &Store{database}, nil
+  return &Store{pool}, nil
 }
 
 type User struct {
@@ -50,12 +50,12 @@ type User struct {
   FirstName string `db:"first_name" json:"firstName"`
 }
 
-func (s *Store) GetUserByName(ctx context.Context, firstName string) (*User, error) {
-  row, _ := s.Pool.Query(ctx, "SELECT * FROM users WHERE first_name = $1", firstName)
+func (s *Store) GetUserByName(ctx context.Context, name string) (*User, error) {
+  row, _ := s.Pool.Query(ctx, "SELECT * FROM users WHERE first_name = $1", name)
 
   user, err := pgx.CollectOneRow(row, pgx.RowToStructByName[User])
   if err != nil {
-    return nil, fmt.Errorf("[GUBN] querying for < %s > | %w", firstName, err)
+    return nil, fmt.Errorf("collecting single user [%s]: %w", name, err)
   }
 
   return &user, nil
