@@ -18,7 +18,13 @@ type Handlers struct {
 
 func (h *Handlers) RegisterRoutes(app *echo.Echo) {
   secret := util.SecretKeyAsBytes()
-  protected := echojwt.JWT(secret)
+  protected := echojwt.WithConfig(echojwt.Config{
+    SigningKey: secret,
+    // Override handler to remove error message.
+    ErrorHandler: func(ctx echo.Context, _ error) error {
+      return ctx.NoContent(http.StatusUnauthorized)
+    },
+  })
 
   logger := echomiddleware.RequestLoggerConfig{
     LogURI:        true,

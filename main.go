@@ -57,7 +57,6 @@ func main() {
   defer store.Pool.Close()
   port := buildPort()
 
-  slog.Info("starting server...", "port", port)
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {
     abort(err)
   }
