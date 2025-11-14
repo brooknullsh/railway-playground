@@ -6,6 +6,7 @@ import (
   "time"
 
   "github.com/brooknullsh/railway-playground/internal/store"
+  "github.com/brooknullsh/railway-playground/internal/util"
   "github.com/labstack/echo/v4"
 )
 
@@ -32,8 +33,8 @@ func (h *AuthHandler) Login(ctx echo.Context) error {
     return ctx.NoContent(http.StatusInternalServerError)
   }
 
-  claims := CustomClaims{FirstName: user.FirstName}
-  token, err := claims.GenerateToken()
+  claims := util.CustomClaims{FirstName: user.FirstName}
+  token, err := claims.GenerateJWT()
   if err != nil {
     slog.Error("token generation", "error", err)
     return ctx.NoContent(http.StatusInternalServerError)
@@ -45,7 +46,7 @@ func (h *AuthHandler) Login(ctx echo.Context) error {
     HttpOnly: true,
     Secure:   true,
     Path:     "/",
-    Expires:  time.Now().Add(lifespan),
+    Expires:  time.Now().Add(util.JWTLifespan),
   }
 
   ctx.SetCookie(&cookie)
@@ -55,7 +56,7 @@ func (h *AuthHandler) Login(ctx echo.Context) error {
 }
 
 func (h *AuthHandler) Protected(ctx echo.Context) error {
-  claims, err := DecodeToken(ctx)
+  claims, err := util.DecodeJWTFromRequest(ctx)
   if err != nil {
     slog.Error("token decoding", "error", err)
     return ctx.NoContent(http.StatusInternalServerError)

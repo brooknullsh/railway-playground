@@ -1,4 +1,4 @@
-package handler
+package util
 
 import (
   "fmt"
@@ -10,15 +10,15 @@ import (
   "github.com/labstack/echo/v4"
 )
 
-var lifespan = time.Hour * 24
+var JWTLifespan = time.Hour * 24
 
 type CustomClaims struct {
   FirstName string `json:"firstName"`
 }
 
-func (c *CustomClaims) GenerateToken() (string, error) {
+func (c *CustomClaims) GenerateJWT() (string, error) {
   now := time.Now()
-  expiry := now.Add(lifespan)
+  expiry := now.Add(JWTLifespan)
 
   token := jwt.New(jwt.SigningMethodHS256)
   // Ignoring the error for parsing claims on a fresh token.
@@ -29,11 +29,11 @@ func (c *CustomClaims) GenerateToken() (string, error) {
   claims["iat"] = jwt.NewNumericDate(now)
   claims["exp"] = jwt.NewNumericDate(expiry)
 
-  secret := SecretKeyBytes()
+  secret := SecretKeyAsBytes()
   return token.SignedString(secret)
 }
 
-func DecodeToken(ctx echo.Context) (*CustomClaims, error) {
+func DecodeJWTFromRequest(ctx echo.Context) (*CustomClaims, error) {
   token, exists := ctx.Get("user").(*jwt.Token)
   if !exists {
     return nil, fmt.Errorf("missing token")
@@ -47,7 +47,7 @@ func DecodeToken(ctx echo.Context) (*CustomClaims, error) {
   return &CustomClaims{FirstName: claims["firstName"].(string)}, nil
 }
 
-func SecretKeyBytes() []byte {
+func SecretKeyAsBytes() []byte {
   if secret, exists := os.LookupEnv("JWT_SECRET"); exists {
     return []byte(secret)
   } else {

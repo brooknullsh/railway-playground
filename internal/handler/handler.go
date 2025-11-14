@@ -5,6 +5,7 @@ import (
   "net/http"
 
   "github.com/brooknullsh/railway-playground/internal/store"
+  "github.com/brooknullsh/railway-playground/internal/util"
   echojwt "github.com/labstack/echo-jwt/v4"
   "github.com/labstack/echo/v4"
   echomiddleware "github.com/labstack/echo/v4/middleware"
@@ -16,7 +17,7 @@ type Handlers struct {
 }
 
 func (h *Handlers) RegisterRoutes(app *echo.Echo) {
-  secret := SecretKeyBytes()
+  secret := util.SecretKeyAsBytes()
   protected := echojwt.JWT(secret)
 
   logger := echomiddleware.RequestLoggerConfig{
