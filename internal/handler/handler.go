@@ -5,8 +5,6 @@ import (
   "net/http"
 
   "github.com/brooknullsh/railway-playground/internal/store"
-  "github.com/brooknullsh/railway-playground/internal/util"
-  echojwt "github.com/labstack/echo-jwt/v4"
   "github.com/labstack/echo/v4"
   echomiddleware "github.com/labstack/echo/v4/middleware"
 )
@@ -17,15 +15,6 @@ type Handlers struct {
 }
 
 func (h *Handlers) RegisterRoutes(app *echo.Echo) {
-  secret := util.SecretKeyAsBytes()
-  protected := echojwt.WithConfig(echojwt.Config{
-    SigningKey: secret,
-    // Override handler to remove error message.
-    ErrorHandler: func(ctx echo.Context, _ error) error {
-      return ctx.NoContent(http.StatusUnauthorized)
-    },
-  })
-
   logger := echomiddleware.RequestLoggerConfig{
     LogURI:        true,
     LogStatus:     true,
@@ -46,6 +35,12 @@ func (h *Handlers) RegisterRoutes(app *echo.Echo) {
 
   app.Use(echomiddleware.RequestLoggerWithConfig(logger))
   app.Use(echomiddleware.RateLimiterWithConfig(limiter))
+
+  protected := func(next echo.HandlerFunc) echo.HandlerFunc {
+    return func(ctx echo.Context) error {
+      return h.auth.ProtectedMiddleware(next, ctx)
+    }
+  }
 
   app.GET("/", h.index.Root)
   app.POST("/login", h.auth.Login)

@@ -5,8 +5,8 @@ import (
   "net/http"
   "time"
 
+  "github.com/brooknullsh/railway-playground/internal/middleware"
   "github.com/brooknullsh/railway-playground/internal/store"
-  "github.com/brooknullsh/railway-playground/internal/util"
   "github.com/labstack/echo/v4"
 )
 
@@ -33,35 +33,44 @@ func (h *AuthHandler) Login(ctx echo.Context) error {
     return ctx.NoContent(http.StatusInternalServerError)
   }
 
-  claims := util.CustomClaims{FirstName: user.FirstName}
+  claims := middleware.CustomClaims{FirstName: user.FirstName}
   token, err := claims.GenerateJWT()
   if err != nil {
     slog.Error("token generation", "error", err)
     return ctx.NoContent(http.StatusInternalServerError)
   }
 
-  cookie := http.Cookie{
-    Name:     "jwt",
-    Value:    token,
-    HttpOnly: true,
-    Secure:   true,
-    Path:     "/",
-    Expires:  time.Now().Add(util.JWTLifespan),
-  }
+  cookie := claims.BuildCookie(token)
+  ctx.SetCookie(cookie)
 
-  ctx.SetCookie(&cookie)
-  slog.Info("logged in", "name", user.FirstName)
-
+  slog.Info("logged in", "exp", claims.ExpiresAt.Time)
   return ctx.NoContent(http.StatusOK)
 }
 
 func (h *AuthHandler) Protected(ctx echo.Context) error {
-  claims, err := util.DecodeJWTFromRequest(ctx)
+  claims := ctx.Get("claims").(*middleware.CustomClaims)
+  slog.Info("decoded token", "exp", claims.ExpiresAt.Time)
+
+  return ctx.String(http.StatusOK, claims.FirstName)
+}
+
+func (h *AuthHandler) ProtectedMiddleware(next echo.HandlerFunc, ctx echo.Context) error {
+  claims, err := middleware.DecodeJWTFromMiddleware(ctx)
   if err != nil {
     slog.Error("token decoding", "error", err)
-    return ctx.NoContent(http.StatusInternalServerError)
+    return ctx.NoContent(http.StatusUnauthorized)
   }
 
-  slog.Info("decoded token", "name", claims.FirstName)
-  return ctx.String(http.StatusOK, claims.FirstName)
+  if time.Until(claims.ExpiresAt.Time) < time.Minute {
+    cookie, code := claims.RefreshCookie()
+    if code != http.StatusOK {
+      return ctx.NoContent(code)
+    }
+
+    slog.Info("token refreshed", "exp", claims.ExpiresAt.Time)
+    ctx.SetCookie(cookie)
+  }
+
+  ctx.Set("claims", claims)
+  return next(ctx)
 }
