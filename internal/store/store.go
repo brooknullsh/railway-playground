@@ -2,15 +2,22 @@ package store
 
 import (
   "context"
+  "database/sql"
   "fmt"
   "os"
+  "time"
 
-  "github.com/jackc/pgx/v5"
   "github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Store struct {
-  Pool *pgxpool.Pool
+  pool *pgxpool.Pool
+  User *UserStore
+  Auth *AuthStore
+}
+
+func (s *Store) Close() {
+  s.pool.Close()
 }
 
 func NewAndConnect() (*Store, error) {
@@ -38,7 +45,7 @@ func NewAndConnect() (*Store, error) {
     return nil, fmt.Errorf("pinging database: %w", err)
   }
 
-  return &Store{pool}, nil
+  return &Store{pool, &UserStore{pool}, &AuthStore{pool}}, nil
 }
 
 type User struct {
@@ -48,15 +55,8 @@ type User struct {
   Mobile    string `db:"mobile"     json:"mobile"`
   LastName  string `db:"last_name"  json:"lastName"`
   FirstName string `db:"first_name" json:"firstName"`
-}
-
-func (s *Store) GetUserByName(ctx context.Context, name string) (*User, error) {
-  row, _ := s.Pool.Query(ctx, "SELECT * FROM users WHERE first_name = $1", name)
-
-  user, err := pgx.CollectOneRow(row, pgx.RowToStructByName[User])
-  if err != nil {
-    return nil, fmt.Errorf("collecting single user [%s]: %w", name, err)
-  }
-
-  return &user, nil
+  // TODO: Omit these?
+  CreatedAt    time.Time      `db:"created_at" json:"createdAt"`
+  UpdatedAt    time.Time      `db:"updated_at" json:"updatedAt"`
+  RefreshToken sql.NullString `db:"refresh_token" json:"refreshToken"`
 }

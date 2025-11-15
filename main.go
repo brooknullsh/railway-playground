@@ -12,6 +12,21 @@ import (
 )
 
 // See: https://github.com/dunamismax/go-web-server
+//
+// TODO:
+// - Check if public vars need to bee
+// - Return status codes from utility functions outside handlers
+//    - Auth middleware "global" vars
+// - Merge types e.g. (a, b string)
+// - Validate all params are needed in funcs
+// - Check logs
+//     - Need to be there
+//     - Format is consistent
+// - No need for one word vars
+// - Call token strings "JWT strings"
+// - Comment everything
+// - Format all comments
+// - Organise private and public funcs
 
 func abort(err error) {
   text := err.Error()
@@ -54,7 +69,7 @@ func main() {
   setLogger()
 
   store, app := setup()
-  defer store.Pool.Close()
+  defer store.Close()
   port := buildPort()
 
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {

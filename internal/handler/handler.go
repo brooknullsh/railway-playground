@@ -53,7 +53,7 @@ func InitialiseWithState(app *echo.Echo, store *store.Store) {
 }
 
 func requestLogger(_ echo.Context, data echomiddleware.RequestLoggerValues) error {
-  if data.Error != nil {
+  if data.Status >= http.StatusBadRequest {
     slog.Error(
       "failed request",
       "uri", data.URI,
