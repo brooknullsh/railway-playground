@@ -9,12 +9,17 @@ import (
   echomiddleware "github.com/labstack/echo/v4/middleware"
 )
 
-type Handlers struct {
+type Handler struct {
   index *IndexHandler
   auth  *AuthHandler
 }
 
-func (h *Handlers) RegisterRoutes(app *echo.Echo) {
+func InitialiseWithState(app *echo.Echo, store *store.Store) {
+  handlers := &Handler{&IndexHandler{store}, &AuthHandler{store}}
+  handlers.registerRoutes(app)
+}
+
+func (h *Handler) registerRoutes(app *echo.Echo) {
   logger := echomiddleware.RequestLoggerConfig{
     LogURI:        true,
     LogStatus:     true,
@@ -42,14 +47,8 @@ func (h *Handlers) RegisterRoutes(app *echo.Echo) {
     }
   }
 
-  app.GET("/", h.index.Root)
+  app.GET("/", h.index.Root, protected)
   app.POST("/login", h.auth.Login)
-  app.GET("/protected", h.auth.Protected, protected)
-}
-
-func InitialiseWithState(app *echo.Echo, store *store.Store) {
-  handlers := &Handlers{index: &IndexHandler{store}, auth: &AuthHandler{store}}
-  handlers.RegisterRoutes(app)
 }
 
 func requestLogger(_ echo.Context, data echomiddleware.RequestLoggerValues) error {

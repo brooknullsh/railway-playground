@@ -1,9 +1,6 @@
 package store
 
 import (
-  "fmt"
-  "log/slog"
-
   "github.com/jackc/pgx/v5/pgxpool"
   "github.com/labstack/echo/v4"
 )
@@ -12,7 +9,7 @@ type AuthStore struct {
   Pool *pgxpool.Pool
 }
 
-func (s *AuthStore) RefreshTokenExists(ctx echo.Context, refreshToken string) (exists bool) {
+func (s *AuthStore) RefreshTokenExists(ctx echo.Context, token string) (exists bool) {
   statement := `
   SELECT EXISTS (
     SELECT 1 FROM users
@@ -22,40 +19,39 @@ func (s *AuthStore) RefreshTokenExists(ctx echo.Context, refreshToken string) (e
   )
   `
 
-  err := s.Pool.QueryRow(ctx.Request().Context(), statement, refreshToken).Scan(&exists)
+  err := s.Pool.QueryRow(ctx.Request().Context(), statement, token).Scan(&exists)
   if err != nil {
-    slog.Error("validating refresh token exists", "error", err)
     return false
   }
 
   return
 }
 
-func (s *AuthStore) UpdateRefreshToken(ctx echo.Context, newRefreshToken, oldRefreshToken string) error {
+func (s *AuthStore) UpdateRefreshToken(ctx echo.Context, newToken, oldToken string) error {
   statement := `
   UPDATE users
   SET refresh_token = $1
   WHERE refresh_token = $2
   `
 
-  _, err := s.Pool.Exec(ctx.Request().Context(), statement, newRefreshToken, oldRefreshToken)
+  _, err := s.Pool.Exec(ctx.Request().Context(), statement, newToken, oldToken)
   if err != nil {
-    return fmt.Errorf("updating the refresh token: %w", err)
+    return err
   }
 
   return nil
 }
 
-func (s *AuthStore) SetRefreshToken(ctx echo.Context, newRefreshToken, userFirstName string) error {
+func (s *AuthStore) SetRefreshToken(ctx echo.Context, newToken, name string) error {
   statement := `
   UPDATE users
   SET refresh_token = $1
   WHERE first_name = $2
   `
 
-  _, err := s.Pool.Exec(ctx.Request().Context(), statement, newRefreshToken, userFirstName)
+  _, err := s.Pool.Exec(ctx.Request().Context(), statement, newToken, name)
   if err != nil {
-    return fmt.Errorf("setting refresh token for [%s]: %w", userFirstName, err)
+    return err
   }
 
   return nil

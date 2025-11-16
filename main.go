@@ -5,74 +5,43 @@ import (
   "log/slog"
   "net/http"
   "os"
+  "time"
 
   "github.com/brooknullsh/railway-playground/internal/handler"
   "github.com/brooknullsh/railway-playground/internal/store"
   "github.com/labstack/echo/v4"
+  "github.com/lmittmann/tint"
 )
 
-// See: https://github.com/dunamismax/go-web-server
-//
-// TODO:
-// - Check if public vars need to bee
-// - Return status codes from utility functions outside handlers
-//    - Auth middleware "global" vars
-// - Merge types e.g. (a, b string)
-// - Validate all params are needed in funcs
-// - Check logs
-//     - Need to be there
-//     - Format is consistent
-// - No need for one word vars
-// - Call token strings "JWT strings"
-// - Comment everything
-// - Format all comments
-// - Organise private and public funcs
-
-func abort(err error) {
-  text := err.Error()
-  slog.Error(text)
-
-  os.Exit(1)
-}
-
-func setLogger() {
-  options := slog.HandlerOptions{Level: slog.LevelDebug}
-  overwrite := slog.NewTextHandler(os.Stdout, &options)
-
-  logger := slog.New(overwrite)
-  slog.SetDefault(logger)
-}
-
-func buildPort() (port string) {
-  if value, exists := os.LookupEnv("PORT"); exists {
-    port = ":" + value
-  } else {
-    port = ":8080"
+func main() {
+  opts := tint.Options{
+    Level:      slog.LevelDebug,
+    TimeFormat: time.Kitchen,
   }
 
-  return
-}
+  overwrite := tint.NewHandler(os.Stderr, &opts)
+  logger := slog.New(overwrite)
+  slog.SetDefault(logger)
 
-func setup() (*store.Store, *echo.Echo) {
   store, err := store.NewAndConnect()
   if err != nil {
-    abort(err)
+    slog.Error("creating database pool", "error", err)
+    os.Exit(1)
+  }
+
+  defer store.Pool.Close()
+
+  var port string
+  if port = os.Getenv("PORT"); port == "" {
+    port = ":8080"
+  } else {
+    port = ":" + port
   }
 
   app := echo.New()
   handler.InitialiseWithState(app, store)
 
-  return store, app
-}
-
-func main() {
-  setLogger()
-
-  store, app := setup()
-  defer store.Close()
-  port := buildPort()
-
   if err := app.Start(port); err != nil && !errors.Is(err, http.ErrServerClosed) {
-    abort(err)
+    slog.Error("server crash", "error", err)
   }
 }
