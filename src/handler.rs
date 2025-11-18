@@ -5,12 +5,44 @@ use axum::{
   extract::{Request, State},
   http::StatusCode,
   middleware::Next,
-  response::IntoResponse,
+  response::{IntoResponse, Response},
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, prelude::FromRow, types::chrono};
 use tower_cookies::{Cookie, Cookies, cookie::time::OffsetDateTime};
+
+const THIRTY_MINUTES_AS_SECS: i64 = 1_800;
+const THIRTY_DAYS_AS_SECS: i64 = 2_592_000;
+
+pub struct HandlerError(StatusCode);
+type HandlerResult<T> = Result<T, HandlerError>;
+
+impl IntoResponse for HandlerError {
+  fn into_response(self) -> Response {
+    self.0.into_response()
+  }
+}
+
+impl From<StatusCode> for HandlerError {
+  fn from(code: StatusCode) -> Self {
+    Self(code)
+  }
+}
+
+impl From<sqlx::Error> for HandlerError {
+  fn from(err: sqlx::Error) -> Self {
+    tracing::error!("[DATABASE] {err}");
+    Self(StatusCode::INTERNAL_SERVER_ERROR)
+  }
+}
+
+impl From<anyhow::Error> for HandlerError {
+  fn from(err: anyhow::Error) -> Self {
+    tracing::error!("[UNEXPECTED] {err}");
+    Self(StatusCode::INTERNAL_SERVER_ERROR)
+  }
+}
 
 #[derive(PartialEq)]
 enum TokenKind {
@@ -32,8 +64,9 @@ impl TokenKind {
       TokenKind::Refresh => "JWT_REFRESH_SECRET",
     };
 
-    let secret = env::var(key).inspect_err(|err| tracing::error!("{err}"))?;
-    Ok(secret.into_bytes())
+    env::var(key)
+      .map(|value| value.into_bytes())
+      .map_err(anyhow::Error::from)
   }
 }
 
@@ -56,8 +89,8 @@ pub struct UserContext {
   first_name: String,
 }
 
-pub async fn index(Extension(user): Extension<UserContext>) -> impl IntoResponse {
-  (StatusCode::OK, user.first_name).into_response()
+pub async fn index(Extension(user): Extension<UserContext>) -> HandlerResult<impl IntoResponse> {
+  Ok(user.first_name)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,8 +103,8 @@ impl Claims {
   fn new(kind: TokenKind, name: &str) -> Self {
     let now = OffsetDateTime::now_utc();
     let expiry = match kind {
-      TokenKind::Access => (now.unix_timestamp() + 1_800) as usize,
-      TokenKind::Refresh => (now.unix_timestamp() + 2_592_000) as usize,
+      TokenKind::Access => (now.unix_timestamp() + THIRTY_MINUTES_AS_SECS) as usize,
+      TokenKind::Refresh => (now.unix_timestamp() + THIRTY_DAYS_AS_SECS) as usize,
     };
 
     Self {
@@ -85,9 +118,7 @@ impl Claims {
     let secret = kind.to_secret_as_bytes()?;
     let secret = DecodingKey::from_secret(&secret);
 
-    jsonwebtoken::decode(token, &secret, &validation)
-      .inspect_err(|err| tracing::error!("{err}"))
-      .map_err(anyhow::Error::from)
+    jsonwebtoken::decode(token, &secret, &validation).map_err(anyhow::Error::from)
   }
 
   fn into_token(&self, kind: TokenKind) -> anyhow::Result<String> {
@@ -95,9 +126,7 @@ impl Claims {
     let secret = kind.to_secret_as_bytes()?;
     let secret = EncodingKey::from_secret(&secret);
 
-    jsonwebtoken::encode(&header, self, &secret)
-      .inspect_err(|err| tracing::error!("{err}"))
-      .map_err(anyhow::Error::from)
+    jsonwebtoken::encode(&header, self, &secret).map_err(anyhow::Error::from)
   }
 
   fn into_cookie<'l>(self, kind: TokenKind, value: String) -> Cookie<'l> {
@@ -124,34 +153,28 @@ pub async fn login(
   cookies: Cookies,
   State(pool): State<Arc<PgPool>>,
   Json(payload): Json<LoginPayload>,
-) -> impl IntoResponse {
+) -> HandlerResult<impl IntoResponse> {
   let access_key = TokenKind::Access.to_cookie_name();
   if cookies.get(&access_key).is_some() {
-    return StatusCode::NO_CONTENT.into_response();
+    return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
   }
 
-  let Ok(user) = get_user_by_name(&pool, &payload.first_name).await else {
-    return StatusCode::NOT_FOUND.into_response();
-  };
+  let user = get_user_by_name(&pool, &payload.first_name).await?;
 
   let access_claims = Claims::new(TokenKind::Access, &user.first_name);
-  let Ok(access_token) = access_claims.into_token(TokenKind::Access) else {
-    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-  };
+  let access_token = access_claims.into_token(TokenKind::Access)?;
 
   let refresh_claims = Claims::new(TokenKind::Refresh, &user.first_name);
-  let Ok(refresh_token) = refresh_claims.into_token(TokenKind::Refresh) else {
-    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-  };
+  let refresh_token = refresh_claims.into_token(TokenKind::Refresh)?;
 
   if !set_refresh_token_by_user(&pool, &refresh_token, &user.first_name).await {
-    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    return Err(StatusCode::INTERNAL_SERVER_ERROR).map_err(HandlerError::from);
   }
 
   cookies.add(access_claims.into_cookie(TokenKind::Access, access_token));
   cookies.add(refresh_claims.into_cookie(TokenKind::Refresh, refresh_token));
 
-  StatusCode::OK.into_response()
+  Ok(StatusCode::OK)
 }
 
 pub async fn protected(
@@ -159,37 +182,30 @@ pub async fn protected(
   State(pool): State<Arc<PgPool>>,
   mut request: Request,
   next: Next,
-) -> impl IntoResponse {
+) -> HandlerResult<impl IntoResponse> {
   let refresh_key = TokenKind::Refresh.to_cookie_name();
   let access_key = TokenKind::Access.to_cookie_name();
 
-  let refresh_token = match cookies.get(&refresh_key) {
-    Some(cookie) => cookie.value().to_string(),
-    None => return StatusCode::UNAUTHORIZED.into_response(),
-  };
+  let refresh_token = cookies
+    .get(&refresh_key)
+    .map(|cookie| cookie.value().to_string())
+    .ok_or(StatusCode::UNAUTHORIZED)?;
 
-  let refresh_claims = match Claims::from_token(TokenKind::Refresh, &refresh_token) {
-    Ok(token_data) => token_data.claims,
-    Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-  };
+  let claims = Claims::from_token(TokenKind::Refresh, &refresh_token).map(|data| data.claims)?;
 
   if cookies.get(access_key).is_none() {
     if !refresh_token_exists(&pool, &refresh_token).await {
-      return StatusCode::UNAUTHORIZED.into_response();
+      return Err(StatusCode::UNAUTHORIZED).map_err(HandlerError::from);
     }
 
-    let access_claims = Claims::new(TokenKind::Access, &refresh_claims.first_name);
-    let Ok(access_token) = access_claims.into_token(TokenKind::Access) else {
-      return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
+    let access_claims = Claims::new(TokenKind::Access, &claims.first_name);
+    let access_token = access_claims.into_token(TokenKind::Access)?;
 
-    let refresh_claims = Claims::new(TokenKind::Refresh, &refresh_claims.first_name);
-    let Ok(refresh_token) = refresh_claims.into_token(TokenKind::Refresh) else {
-      return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
+    let refresh_claims = Claims::new(TokenKind::Refresh, &claims.first_name);
+    let refresh_token = refresh_claims.into_token(TokenKind::Refresh)?;
 
     if !update_refresh_token(&pool, &refresh_token, &refresh_token).await {
-      return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+      return Err(StatusCode::INTERNAL_SERVER_ERROR).map_err(HandlerError::from);
     }
 
     cookies.add(access_claims.into_cookie(TokenKind::Access, access_token));
@@ -197,13 +213,13 @@ pub async fn protected(
   }
 
   request.extensions_mut().insert(UserContext {
-    first_name: refresh_claims.first_name,
+    first_name: claims.first_name,
   });
 
-  next.run(request).await
+  Ok(next.run(request).await)
 }
 
-async fn get_user_by_name(pool: &PgPool, name: &str) -> anyhow::Result<User> {
+async fn get_user_by_name(pool: &PgPool, name: &str) -> HandlerResult<User> {
   let statement = r#"
     SELECT * FROM users
     WHERE first_name = $1
@@ -214,8 +230,7 @@ async fn get_user_by_name(pool: &PgPool, name: &str) -> anyhow::Result<User> {
     .bind(name)
     .fetch_one(pool)
     .await
-    .inspect_err(|err| tracing::error!("{err}"))
-    .map_err(anyhow::Error::from)
+    .map_err(HandlerError::from)
 }
 
 async fn set_refresh_token_by_user(pool: &PgPool, token: &str, name: &str) -> bool {
@@ -230,7 +245,6 @@ async fn set_refresh_token_by_user(pool: &PgPool, token: &str, name: &str) -> bo
     .bind(name)
     .execute(pool)
     .await
-    .inspect_err(|err| tracing::error!("{err}"))
     .is_ok()
 }
 
@@ -248,7 +262,6 @@ async fn refresh_token_exists(pool: &PgPool, token: &str) -> bool {
     .bind(token)
     .fetch_one(pool)
     .await
-    .inspect_err(|err| tracing::error!("{err}"))
     .unwrap_or(false)
 }
 
@@ -264,6 +277,5 @@ async fn update_refresh_token(pool: &PgPool, new_token: &str, old_token: &str) -
     .bind(old_token)
     .execute(pool)
     .await
-    .inspect_err(|err| tracing::error!("{err}"))
     .is_ok()
 }

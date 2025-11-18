@@ -10,10 +10,8 @@ use tracing::Level;
 mod handler;
 
 async fn startup() -> anyhow::Result<(TcpListener, Router)> {
-  let pool = {
-    let url = env::var("DATABASE_URL")?;
-    PgPoolOptions::new().connect(&url).await?
-  };
+  let url = env::var("DATABASE_URL")?;
+  let pool = PgPoolOptions::new().connect(&url).await?;
 
   let cookie_layer = CookieManagerLayer::new();
   let tracing_layer = TraceLayer::new_for_http()
@@ -31,10 +29,8 @@ async fn startup() -> anyhow::Result<(TcpListener, Router)> {
     .layer(cookie_layer)
     .with_state(shared_pool);
 
-  let host = {
-    let port = env::var("PORT").unwrap_or("8080".to_string());
-    format!("0.0.0.0:{}", port)
-  };
+  let port = env::var("PORT").unwrap_or("8080".to_string());
+  let host = format!("0.0.0.0:{}", port);
 
   let listener = TcpListener::bind(&host).await?;
   tracing::info!("Starting at: {host}");
