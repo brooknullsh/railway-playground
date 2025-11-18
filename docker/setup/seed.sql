@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
   mobile        TEXT NOT NULL,
   is_pro        BOOLEAN NOT NULL,
   refresh_token TEXT,
-  created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 INSERT INTO users (first_name, last_name, age, mobile, is_pro, refresh_token) VALUES
@@ -31,7 +31,3 @@ INSERT INTO users (first_name, last_name, age, mobile, is_pro, refresh_token) VA
   ('Rachel','Reed', 23, '+1-219-555-0183', FALSE, NULL),
   ('Steve','Stone', 36, '+1-220-555-0144', TRUE, NULL),
   ('Tina','Taylor', 40, '+1-221-555-0150', TRUE, NULL);
-
-CREATE INDEX IF NOT EXISTS idx_users_refresh_token
-ON users (refresh_token)
-WHERE refresh_token IS NOT NULL;

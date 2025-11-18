@@ -1,7 +1,6 @@
 FROM oven/bun:latest
-WORKDIR /client-local
+WORKDIR /app
 
-# Copy source files for running the client.
 COPY client/package.json     .
 COPY client/vite.config.ts   .
 COPY client/svelte.config.js .

@@ -1,12 +1,11 @@
-FROM golang:latest AS builder
-WORKDIR /server-local
+FROM rust:alpine
+WORKDIR /app
 
-# Copy source files for running the server.
-COPY go.mod go.sum main.go ./
-COPY internal/             ./internal
+RUN apk add --no-cache musl-dev
 
-# Add hot-reloading with mounted source files.
-RUN go install github.com/air-verse/air@latest
-RUN go mod download
+COPY Cargo* .
+COPY src    ./src
 
-CMD ["air"]
+RUN cargo install cargo-watch
+
+CMD ["cargo", "watch", "-x", "run"]

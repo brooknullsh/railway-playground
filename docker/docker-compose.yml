@@ -26,8 +26,7 @@ services:
       - JWT_REFRESH_SECRET=refresh_secret
     volumes:
       # Source files for hot-reloading.
-      - ../main.go:/server-local/main.go
-      - ../internal:/server-local/internal
+      - ../src:/app/src
 
   client:
     restart: on-failure
@@ -44,5 +43,5 @@ services:
     volumes:
       # Source files for hot-reloading.
       # NOTE: Generated types are shared within the .svelte-kit folder.
-      - ../client/.svelte-kit:/client-local/.svelte-kit
-      - ../client/src:/client-local/src
+      - ../client/.svelte-kit:/app/.svelte-kit
+      - ../client/src:/app/src

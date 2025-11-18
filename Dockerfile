@@ -1,14 +1,16 @@
-FROM golang:latest AS builder
-WORKDIR /server
+FROM rust:alpine AS builder
+WORKDIR /app
 
-# Copy source files for building the binary.
-COPY go.mod go.sum main.go ./
-COPY internal/             ./internal
+RUN apk add --no-cache musl-dev
+RUN cargo init --bin --vcs none
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o railway-playground
+COPY Cargo* .
+COPY src    ./src
+
+RUN cargo build -r
 
 FROM scratch
 
-COPY --from=builder /server/railway-playground .
+COPY --from=builder /app/target/release/railway-playground .
 
 CMD ["/railway-playground"]
