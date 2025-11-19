@@ -1,16 +1,29 @@
-use std::{env, sync::Arc};
+use std::sync::Arc;
 
-use axum::{
-  Extension, Json,
-  extract::{Request, State},
-  http::StatusCode,
-  middleware::Next,
-  response::{IntoResponse, Response},
-};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation};
-use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, prelude::FromRow, types::chrono};
-use tower_cookies::{Cookie, Cookies, cookie::time::OffsetDateTime};
+use axum::Extension;
+use axum::Json;
+use axum::extract::Request;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use axum::response::Response;
+use jsonwebtoken::DecodingKey;
+use jsonwebtoken::EncodingKey;
+use jsonwebtoken::Header;
+use jsonwebtoken::TokenData;
+use jsonwebtoken::Validation;
+use serde::Deserialize;
+use serde::Serialize;
+use sqlx::PgPool;
+use sqlx::prelude::FromRow;
+use sqlx::types::chrono;
+use tower_cookies::Cookie;
+use tower_cookies::Cookies;
+use tower_cookies::cookie::time::OffsetDateTime;
+
+use crate::ACCESS_SECRET;
+use crate::REFRESH_SECRET;
 
 const THIRTY_MINUTES_AS_SECS: i64 = 1_800;
 const THIRTY_DAYS_AS_SECS: i64 = 2_592_000;
@@ -58,15 +71,13 @@ impl TokenKind {
     }
   }
 
-  fn to_secret_as_bytes(self) -> anyhow::Result<Vec<u8>> {
+  fn to_secret_as_bytes(self) -> Vec<u8> {
     let key = match self {
-      TokenKind::Access => "JWT_ACCESS_SECRET",
-      TokenKind::Refresh => "JWT_REFRESH_SECRET",
+      TokenKind::Access => &*ACCESS_SECRET,
+      TokenKind::Refresh => &*REFRESH_SECRET,
     };
 
-    env::var(key)
-      .map(|value| value.into_bytes())
-      .map_err(anyhow::Error::from)
+    key.clone().into_bytes()
   }
 }
 
@@ -115,7 +126,7 @@ impl Claims {
 
   fn from_token(kind: TokenKind, token: &str) -> anyhow::Result<TokenData<Self>> {
     let validation = Validation::default();
-    let secret = kind.to_secret_as_bytes()?;
+    let secret = kind.to_secret_as_bytes();
     let secret = DecodingKey::from_secret(&secret);
 
     jsonwebtoken::decode(token, &secret, &validation).map_err(anyhow::Error::from)
@@ -123,7 +134,7 @@ impl Claims {
 
   fn into_token(&self, kind: TokenKind) -> anyhow::Result<String> {
     let header = Header::default();
-    let secret = kind.to_secret_as_bytes()?;
+    let secret = kind.to_secret_as_bytes();
     let secret = EncodingKey::from_secret(&secret);
 
     jsonwebtoken::encode(&header, self, &secret).map_err(anyhow::Error::from)
@@ -278,4 +289,90 @@ async fn update_refresh_token(pool: &PgPool, new_token: &str, old_token: &str) -
     .execute(pool)
     .await
     .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+  use axum_test::TestResponse;
+  use axum_test::TestServer;
+
+  use crate::create_app;
+
+  use super::*;
+
+  const ACCESS_COOKIE: &str = "access_token";
+  const REFRESH_COOKIE: &str = "refresh_token";
+
+  async fn setup() -> TestServer {
+    let app = create_app().await.unwrap();
+
+    TestServer::builder().build(app).unwrap()
+  }
+
+  fn assert_cookies(response: &TestResponse, exists: bool) {
+    let access_cookie = response.maybe_cookie(ACCESS_COOKIE);
+    let refresh_cookie = response.maybe_cookie(REFRESH_COOKIE);
+
+    assert_eq!(access_cookie.is_some(), exists);
+    assert_eq!(refresh_cookie.is_some(), exists);
+  }
+
+  #[tokio::test]
+  async fn it_should_return_failure_unauthenticated() {
+    let server = setup().await;
+
+    let response = server.get("/").await;
+
+    assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+  }
+
+  #[tokio::test]
+  async fn it_should_return_success_authenticated() {
+    let server = setup().await;
+    let payload = serde_json::json!({ "firstName": "Alice" });
+
+    server.post("/login").json(&payload).save_cookies().await;
+    let response = server.get("/").await;
+
+    assert_eq!(response.status_code(), StatusCode::OK);
+  }
+
+  #[tokio::test]
+  async fn it_should_refresh_access_token() {
+    let server = setup().await;
+    let payload = serde_json::json!({ "firstName": "Alice" });
+
+    let response = server.post("/login").json(&payload).await;
+    let refresh_cookie = response.cookie(REFRESH_COOKIE);
+    let response = server
+      .get("/")
+      .add_cookie(refresh_cookie)
+      .save_cookies()
+      .await;
+
+    assert_cookies(&response, true);
+    assert_eq!(response.status_code(), StatusCode::OK);
+  }
+
+  #[tokio::test]
+  async fn it_should_return_success_on_valid_body() {
+    let server = setup().await;
+    let payload = serde_json::json!({ "firstName": "Alice" });
+
+    let response = server.post("/login").json(&payload).await;
+
+    assert_cookies(&response, true);
+    assert_eq!(response.status_code(), StatusCode::OK);
+  }
+
+  #[tokio::test]
+  async fn it_should_return_failure_on_invalid_body() {
+    let server = setup().await;
+    let payload = serde_json::json!({ "foo": "bar" });
+
+    let response = server.post("/login").json(&payload).expect_failure().await;
+
+    assert_cookies(&response, false);
+    assert_eq!(response.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+  }
 }
