@@ -9,35 +9,37 @@ use axum::routing;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tower_cookies::CookieManagerLayer;
-use tower_http::trace::DefaultOnRequest;
-use tower_http::trace::DefaultOnResponse;
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 
 mod handler;
 
+// All closures are unwrapped to force panic on startup for any missing
+// environment variables.
 static DATABASE_URL: LazyLock<String> = LazyLock::new(|| env::var("DATABASE_URL").unwrap());
 static PORT_NUMBER: LazyLock<String> = LazyLock::new(|| env::var("PORT").unwrap());
 static ACCESS_SECRET: LazyLock<String> = LazyLock::new(|| env::var("JWT_ACCESS_SECRET").unwrap());
 static REFRESH_SECRET: LazyLock<String> = LazyLock::new(|| env::var("JWT_REFRESH_SECRET").unwrap());
 
+/// Dereference (initialise) the necessary environment variables. I'd rather
+/// this panic on startup before any real "runtime" happens.
 fn initialise_environment() {
-  let _ = &*DATABASE_URL;
-  let _ = &*PORT_NUMBER;
-  let _ = &*ACCESS_SECRET;
-  let _ = &*REFRESH_SECRET;
+  let _ = *DATABASE_URL;
+  let _ = *PORT_NUMBER;
+  let _ = *ACCESS_SECRET;
+  let _ = *REFRESH_SECRET;
 
   tracing::info!("environment initialised");
 }
 
+/// Creates a router with all middleware, layers and shared state. Used within
+/// handler tests for requests.
 async fn create_app() -> anyhow::Result<Router> {
   let pool = PgPoolOptions::new().connect(&*DATABASE_URL).await?;
   let shared_pool = Arc::new(pool);
 
   let auth_layer = middleware::from_fn_with_state(shared_pool.clone(), handler::protected);
-  let tracing_layer = TraceLayer::new_for_http()
-    .on_response(DefaultOnResponse::new().level(Level::INFO))
-    .on_request(DefaultOnRequest::new().level(Level::INFO));
+  let tracing_layer = TraceLayer::new_for_http();
   let cookie_layer = CookieManagerLayer::new();
 
   let app = Router::new()
