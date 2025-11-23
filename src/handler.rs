@@ -15,6 +15,7 @@ use jsonwebtoken::Validation;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
+use sqlx::postgres::PgQueryResult;
 use sqlx::prelude::FromRow;
 use sqlx::types::chrono;
 use tower_cookies::Cookie;
@@ -24,10 +25,10 @@ use tower_cookies::cookie::time::OffsetDateTime;
 use crate::ACCESS_SECRET;
 use crate::REFRESH_SECRET;
 
-const ACCESS_COOKIE_NAME: &str = "access_token";
-const REFRESH_COOKIE_NAME: &str = "refresh_token";
 const THIRTY_MINUTES_AS_SECS: i64 = 1_800;
 const THIRTY_DAYS_AS_SECS: i64 = 2_592_000;
+const ACCESS_COOKIE_NAME: &str = "access_token";
+const REFRESH_COOKIE_NAME: &str = "refresh_token";
 
 pub struct HandlerError(StatusCode);
 type HandlerResult<T> = Result<T, HandlerError>;
@@ -38,8 +39,6 @@ impl IntoResponse for HandlerError {
   }
 }
 
-// NOTE: Not necessary, just personal preference to avoid creating a new custom
-// error within the error return statement.
 impl From<StatusCode> for HandlerError {
   fn from(code: StatusCode) -> Self {
     Self(code)
@@ -74,11 +73,6 @@ struct User {
   updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-enum TokenKind {
-  Access,
-  Refresh,
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Claims {
   exp: usize,
@@ -86,38 +80,28 @@ pub struct Claims {
 }
 
 impl Claims {
-  /// Create a new [`Claims`] instance with an expiration offset relevant to the
-  /// [`TokenKind`] passed. The set expiration is used as the cookie lifetime.
-  fn new(kind: TokenKind, name: &str) -> Self {
+  fn new(cookie_name: &str, first_name: &str) -> Self {
+    let first_name = first_name.to_owned();
     let now = OffsetDateTime::now_utc().unix_timestamp();
-
-    let first_name = name.to_owned();
-    let exp = match kind {
-      TokenKind::Access => (now + THIRTY_MINUTES_AS_SECS) as usize,
-      TokenKind::Refresh => (now + THIRTY_DAYS_AS_SECS) as usize,
+    let exp = match cookie_name {
+      ACCESS_COOKIE_NAME => (now + THIRTY_MINUTES_AS_SECS) as usize,
+      REFRESH_COOKIE_NAME => (now + THIRTY_DAYS_AS_SECS) as usize,
+      _ => unreachable!(),
     };
 
     Self { exp, first_name }
   }
 
-  /// Using a token string value, decode it with the passed secret key bytes.
-  /// The [`Validation`] is set with a leeway of 60 seconds and the HS256
-  /// algorithm by default.
-  /// NOTE: The error is mapped to an [`anyhow::Error`] error as I have no
-  /// [`From`] conversion for the [`jsonwebtoken::errors::Error`] type.
   fn from_token(secret: &str, token: &str) -> anyhow::Result<Self> {
     let validation = Validation::default();
     let secret = secret.as_bytes();
     let secret = DecodingKey::from_secret(&secret);
 
-    jsonwebtoken::decode::<Self>(token, &secret, &validation)
+    jsonwebtoken::decode(token, &secret, &validation)
       .map(|data| data.claims)
       .map_err(anyhow::Error::from)
   }
 
-  /// Encode the claims into a JWT string using the passed secret key bytes.
-  /// NOTE: The error is mapped to an [`anyhow::Error`] error as I have no
-  /// [`From`] conversion for the [`jsonwebtoken::errors::Error`] type.
   fn into_token(&self, secret: &str) -> anyhow::Result<String> {
     let header = Header::default();
     let secret = secret.as_bytes();
@@ -126,11 +110,8 @@ impl Claims {
     jsonwebtoken::encode(&header, self, &secret).map_err(anyhow::Error::from)
   }
 
-  /// Create a cookie from the claims using the passed name and JWT string
-  /// value. The claims expiration timestamp declared within [`Claims::new`] is
-  /// used to set the cookie expiration.
-  fn into_cookie<'l>(self, name: &'l str, value: String) -> anyhow::Result<Cookie<'l>> {
-    let base = Cookie::new(name, value);
+  fn into_cookie<'l>(self, cookie_name: &'l str, token: String) -> anyhow::Result<Cookie<'l>> {
+    let base = Cookie::new(cookie_name, token);
     let expiry = OffsetDateTime::from_unix_timestamp(self.exp as i64)?;
 
     let cookie = Cookie::build(base)
@@ -143,8 +124,6 @@ impl Claims {
   }
 }
 
-/// Example protected route returning the first name of the user set as an
-/// [`Extension`] within the [`protected`] middleware.
 pub async fn index(Extension(user): Extension<Claims>) -> HandlerResult<impl IntoResponse> {
   Ok(user.first_name)
 }
@@ -155,8 +134,6 @@ pub struct LoginPayload {
   first_name: String,
 }
 
-/// Creates new [`Claims`] and JWT strings from the passed payload data. Stores
-/// the generated refresh token against the user. Creates both token cookies.
 pub async fn login(
   cookies: Cookies,
   State(pool): State<Arc<PgPool>>,
@@ -169,16 +146,14 @@ pub async fn login(
   let user = get_user_by_name(&pool, &payload.first_name).await?;
   let first_name = &user.first_name;
 
-  let access_claims = Claims::new(TokenKind::Access, first_name);
+  let access_claims = Claims::new(ACCESS_COOKIE_NAME, first_name);
   let access_token = access_claims.into_token(&*ACCESS_SECRET)?;
-  let refresh_claims = Claims::new(TokenKind::Refresh, first_name);
+  let refresh_claims = Claims::new(REFRESH_COOKIE_NAME, first_name);
   let refresh_token = refresh_claims.into_token(&*REFRESH_SECRET)?;
 
-  // The refresh token stored will be checked when generating a new access token
-  // from an existing refresh token.
-  if !set_refresh_token_by_user(&pool, &refresh_token, first_name).await {
-    return Err(StatusCode::INTERNAL_SERVER_ERROR).map_err(HandlerError::from);
-  }
+  // The refresh token stored will be checked for when generating a new access
+  // token from an existing refresh token.
+  set_refresh_token_by_name(&pool, &refresh_token, first_name).await?;
 
   let access_cookie = access_claims.into_cookie(ACCESS_COOKIE_NAME, access_token)?;
   let refresh_cookie = refresh_claims.into_cookie(REFRESH_COOKIE_NAME, refresh_token)?;
@@ -188,43 +163,32 @@ pub async fn login(
   Ok(StatusCode::OK)
 }
 
-/// Set the [`Claims`] data into the request extension data for the following
-/// routes to access. Validate the following:
-/// - Refresh token is passed
-/// - Access token is passed/can be generated from the latest refresh token
 pub async fn protected(
   cookies: Cookies,
   State(pool): State<Arc<PgPool>>,
   mut request: Request,
   next: Next,
 ) -> HandlerResult<impl IntoResponse> {
-  let refresh_token = cookies
+  let refresh_token_from_cookie = cookies
     .get(REFRESH_COOKIE_NAME)
     .ok_or(StatusCode::UNAUTHORIZED)?
     .value()
     .to_string();
 
-  let refresh_claims = Claims::from_token(&*REFRESH_SECRET, &refresh_token)?;
+  let refresh_claims = Claims::from_token(&*REFRESH_SECRET, &refresh_token_from_cookie)?;
   let first_name = &refresh_claims.first_name;
 
   // At this point, we have a valid decoded refresh token so a missing access
   // token can be replaced using said decoded data.
   if cookies.get(ACCESS_COOKIE_NAME).is_none() {
-    if !refresh_token_exists(&pool, &refresh_token).await {
-      return Err(StatusCode::UNAUTHORIZED).map_err(HandlerError::from);
-    }
-
-    let access_claims = Claims::new(TokenKind::Access, first_name);
+    let access_claims = Claims::new(ACCESS_COOKIE_NAME, first_name);
     let access_token = access_claims.into_token(&*ACCESS_SECRET)?;
-    let refresh_claims = Claims::new(TokenKind::Refresh, first_name);
+    let refresh_claims = Claims::new(REFRESH_COOKIE_NAME, first_name);
     let refresh_token = refresh_claims.into_token(&*REFRESH_SECRET)?;
 
-    // As an extra layer of rotation, whenever the access token needs to be
-    // generated we also generate a new refresh token. This then needs to be
-    // stored to ensure the user uses it the next time the access token expires.
-    if !update_refresh_token(&pool, &refresh_token, &refresh_token).await {
-      return Err(StatusCode::INTERNAL_SERVER_ERROR).map_err(HandlerError::from);
-    }
+    // Whenever the access token needs to be generated we also generate a new
+    // refresh token. Then stored to ensure the old one expires.
+    update_refresh_token(&pool, &refresh_token, &refresh_token_from_cookie).await?;
 
     let access_cookie = access_claims.into_cookie(ACCESS_COOKIE_NAME, access_token)?;
     let refresh_cookie = refresh_claims.into_cookie(REFRESH_COOKIE_NAME, refresh_token)?;
@@ -250,7 +214,11 @@ async fn get_user_by_name(pool: &PgPool, name: &str) -> HandlerResult<User> {
     .map_err(HandlerError::from)
 }
 
-async fn set_refresh_token_by_user(pool: &PgPool, token: &str, name: &str) -> bool {
+async fn set_refresh_token_by_name(
+  pool: &PgPool,
+  token: &str,
+  name: &str,
+) -> HandlerResult<PgQueryResult> {
   let statement = r#"
     UPDATE users
     SET refresh_token = $1
@@ -262,27 +230,14 @@ async fn set_refresh_token_by_user(pool: &PgPool, token: &str, name: &str) -> bo
     .bind(name)
     .execute(pool)
     .await
-    .is_ok()
+    .map_err(HandlerError::from)
 }
 
-async fn refresh_token_exists(pool: &PgPool, token: &str) -> bool {
-  let statement = r#"
-    SELECT EXISTS (
-      SELECT 1 FROM users
-      WHERE refresh_token = $1
-      AND refresh_token IS NOT NULL
-      LIMIT 1
-    )
-  "#;
-
-  sqlx::query_scalar(statement)
-    .bind(token)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false)
-}
-
-async fn update_refresh_token(pool: &PgPool, new_token: &str, old_token: &str) -> bool {
+async fn update_refresh_token(
+  pool: &PgPool,
+  new_token: &str,
+  old_token: &str,
+) -> HandlerResult<PgQueryResult> {
   let statement = r#"
     UPDATE users
     SET refresh_token = $1
@@ -294,20 +249,27 @@ async fn update_refresh_token(pool: &PgPool, new_token: &str, old_token: &str) -
     .bind(old_token)
     .execute(pool)
     .await
-    .is_ok()
+    .map_err(HandlerError::from)
 }
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Once;
+
   use axum_test::TestResponse;
   use axum_test::TestServer;
   use serde_json::Value;
 
   use crate::create_app;
+  use crate::setup_logging;
 
   use super::*;
 
+  static LOGGING_INITIALISED: Once = Once::new();
+
   async fn setup() -> TestServer {
+    LOGGING_INITIALISED.call_once(setup_logging);
+
     let app = create_app().await.unwrap();
     TestServer::builder().build(app).unwrap()
   }

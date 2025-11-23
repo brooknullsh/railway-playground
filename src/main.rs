@@ -14,12 +14,18 @@ use tracing::Level;
 
 mod handler;
 
-// All closures are unwrapped to force panic on startup for any missing
-// environment variables.
 static DATABASE_URL: LazyLock<String> = LazyLock::new(|| env::var("DATABASE_URL").unwrap());
 static PORT_NUMBER: LazyLock<String> = LazyLock::new(|| env::var("PORT").unwrap());
 static ACCESS_SECRET: LazyLock<String> = LazyLock::new(|| env::var("JWT_ACCESS_SECRET").unwrap());
 static REFRESH_SECRET: LazyLock<String> = LazyLock::new(|| env::var("JWT_REFRESH_SECRET").unwrap());
+
+fn setup_logging() {
+  tracing_subscriber::fmt()
+    .with_max_level(Level::DEBUG)
+    .with_target(false)
+    .compact()
+    .init();
+}
 
 /// Dereference (initialise) the necessary environment variables. I'd rather
 /// this panic on startup before any real "runtime" happens.
@@ -32,8 +38,6 @@ fn initialise_environment() {
   tracing::info!("environment initialised");
 }
 
-/// Creates a router with all middleware, layers and shared state. Used within
-/// handler tests for requests.
 async fn create_app() -> anyhow::Result<Router> {
   let pool = PgPoolOptions::new().connect(&*DATABASE_URL).await?;
   let shared_pool = Arc::new(pool);
@@ -55,12 +59,7 @@ async fn create_app() -> anyhow::Result<Router> {
 
 #[tokio::main]
 async fn main() {
-  tracing_subscriber::fmt()
-    .with_max_level(Level::DEBUG)
-    .with_target(false)
-    .compact()
-    .init();
-
+  setup_logging();
   initialise_environment();
 
   let Ok(app) = create_app()
