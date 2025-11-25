@@ -1,55 +1,57 @@
 use std::env;
-use std::process;
+use std::process::exit;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::LazyLock;
 
 use axum::Router;
-use axum::middleware;
-use axum::routing;
+use axum::middleware::from_fn_with_state;
+use axum::routing::get;
+use axum::routing::post;
+use axum::serve;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tower_cookies::CookieManagerLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Level;
+use tracing::error;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
+
+use crate::handler::index;
+use crate::handler::login;
+use crate::handler::protected;
 
 mod handler;
 
-static DATABASE_URL: LazyLock<String> = LazyLock::new(|| env::var("DATABASE_URL").unwrap());
-static PORT_NUMBER: LazyLock<String> = LazyLock::new(|| env::var("PORT").unwrap());
-static ACCESS_SECRET: LazyLock<String> = LazyLock::new(|| env::var("JWT_ACCESS_SECRET").unwrap());
-static REFRESH_SECRET: LazyLock<String> = LazyLock::new(|| env::var("JWT_REFRESH_SECRET").unwrap());
-
 fn setup_logging() {
-  tracing_subscriber::fmt()
-    .with_max_level(Level::DEBUG)
+  let log_level = env!("LOG_LEVEL");
+  let log_level = Level::from_str(log_level).unwrap_or(Level::DEBUG);
+  let filter = EnvFilter::from_default_env();
+
+  fmt()
+    .with_env_filter(filter)
+    .with_max_level(log_level)
     .with_target(false)
     .compact()
     .init();
-}
 
-/// Dereference (initialise) the necessary environment variables. I'd rather
-/// this panic on startup before any real "runtime" happens.
-fn initialise_environment() {
-  let _ = *DATABASE_URL;
-  let _ = *PORT_NUMBER;
-  let _ = *ACCESS_SECRET;
-  let _ = *REFRESH_SECRET;
-
-  tracing::info!("environment initialised");
+  info!("logging initialised with {}", log_level);
 }
 
 async fn create_app() -> anyhow::Result<Router> {
-  let pool = PgPoolOptions::new().connect(&*DATABASE_URL).await?;
+  let connection = env!("DATABASE_URL");
+  let pool = PgPoolOptions::new().connect(connection).await?;
   let shared_pool = Arc::new(pool);
 
-  let auth_layer = middleware::from_fn_with_state(shared_pool.clone(), handler::protected);
+  let auth_middleware = from_fn_with_state(shared_pool.clone(), protected);
   let tracing_layer = TraceLayer::new_for_http();
   let cookie_layer = CookieManagerLayer::new();
 
   let app = Router::new()
-    .route("/", routing::get(handler::index))
-    .layer(auth_layer)
-    .route("/login", routing::post(handler::login))
+    .route("/", get(index))
+    .layer(auth_middleware)
+    .route("/login", post(login))
     .layer(tracing_layer)
     .layer(cookie_layer)
     .with_state(shared_pool);
@@ -60,25 +62,26 @@ async fn create_app() -> anyhow::Result<Router> {
 #[tokio::main]
 async fn main() {
   setup_logging();
-  initialise_environment();
 
   let Ok(app) = create_app()
     .await
-    .inspect_err(|err| tracing::error!("{err:#}"))
+    .inspect_err(|err| error!("[SETUP] {err:#}"))
   else {
-    process::exit(1)
+    exit(1)
   };
 
-  let host = format!("0.0.0.0:{}", &*PORT_NUMBER);
+  let port = env!("PORT");
+  let host = format!("0.0.0.0:{}", port);
+
   let Ok(listener) = TcpListener::bind(&host)
     .await
-    .inspect_err(|err| tracing::error!("{err:#}"))
+    .inspect_err(|err| error!("[SETUP] {err:#}"))
   else {
-    process::exit(1)
+    exit(1)
   };
 
-  tracing::info!("Starting at: {host}...");
   // On error, the TCP listener sleeps (for a second) without returning an error
   // so we unwrap the result regardless.
-  axum::serve(listener, app).await.unwrap();
+  info!("Starting at: {host}...");
+  serve(listener, app).await.unwrap();
 }

@@ -1,4 +1,8 @@
+use std::ops::Add;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use axum::Extension;
 use axum::Json;
@@ -8,27 +12,44 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use chrono::DateTime;
+use chrono::Utc;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::EncodingKey;
 use jsonwebtoken::Header;
 use jsonwebtoken::Validation;
+use jsonwebtoken::decode;
+use jsonwebtoken::encode;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
 use sqlx::postgres::PgQueryResult;
 use sqlx::prelude::FromRow;
-use sqlx::types::chrono;
+use sqlx::query;
+use sqlx::query_as;
 use tower_cookies::Cookie;
 use tower_cookies::Cookies;
 use tower_cookies::cookie::time::OffsetDateTime;
+use tracing::error;
 
-use crate::ACCESS_SECRET;
-use crate::REFRESH_SECRET;
+#[derive(Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct User {
+  id: i32,
+  age: i32,
+  is_pro: bool,
+  mobile: String,
+  last_name: String,
+  first_name: String,
+  refresh_token: Option<String>,
+  created_at: DateTime<Utc>,
+  updated_at: DateTime<Utc>,
+}
 
-const THIRTY_MINUTES_AS_SECS: i64 = 1_800;
-const THIRTY_DAYS_AS_SECS: i64 = 2_592_000;
-const ACCESS_COOKIE_NAME: &str = "access_token";
-const REFRESH_COOKIE_NAME: &str = "refresh_token";
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UserContext {
+  first_name: String,
+}
 
 pub struct HandlerError(StatusCode);
 type HandlerResult<T> = Result<T, HandlerError>;
@@ -47,73 +68,98 @@ impl From<StatusCode> for HandlerError {
 
 impl From<sqlx::Error> for HandlerError {
   fn from(err: sqlx::Error) -> Self {
-    tracing::error!("[DATABASE] {err}");
+    error!("[DATABASE] {err}");
     Self(StatusCode::INTERNAL_SERVER_ERROR)
   }
 }
 
 impl From<anyhow::Error> for HandlerError {
   fn from(err: anyhow::Error) -> Self {
-    tracing::error!("[UNEXPECTED] {err}");
+    error!("[UNEXPECTED] {err}");
     Self(StatusCode::INTERNAL_SERVER_ERROR)
   }
 }
 
-#[derive(Serialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-struct User {
-  id: i32,
-  age: i32,
-  is_pro: bool,
-  mobile: String,
-  last_name: String,
-  first_name: String,
-  refresh_token: Option<String>,
-  created_at: chrono::DateTime<chrono::Utc>,
-  updated_at: chrono::DateTime<chrono::Utc>,
+enum Token {
+  Access,
+  Refresh,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+impl Token {
+  const ACCESS_COOKIE_NAME: &str = "access_token";
+  const REFRESH_COOKIE_NAME: &str = "refresh_token";
+
+  const fn into_secret(self) -> &'static str {
+    match self {
+      Self::Access => env!("ACCESS_SECRET"),
+      Self::Refresh => env!("REFRESH_SECRET"),
+    }
+  }
+
+  const fn lifetime(self) -> Duration {
+    match self {
+      Self::Access => Duration::from_secs(1_800),
+      Self::Refresh => Duration::from_secs(2_592_000),
+    }
+  }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Claims {
-  exp: usize,
-  first_name: String,
+  exp: u64,
+  user: UserContext,
 }
 
 impl Claims {
-  fn new(cookie_name: &str, first_name: &str) -> Self {
-    let first_name = first_name.to_owned();
-    let now = OffsetDateTime::now_utc().unix_timestamp();
-    let exp = match cookie_name {
-      ACCESS_COOKIE_NAME => (now + THIRTY_MINUTES_AS_SECS) as usize,
-      REFRESH_COOKIE_NAME => (now + THIRTY_DAYS_AS_SECS) as usize,
-      _ => unreachable!(),
+  fn new_pair(user_claims: UserContext) -> (Self, Self) {
+    let now = SystemTime::now();
+    let access_duration = Token::Access.lifetime();
+    let refresh_duration = Token::Refresh.lifetime();
+
+    let build_expiry = |duration: Duration| {
+      now
+        .add(duration)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
     };
 
-    Self { exp, first_name }
+    let exp = build_expiry(access_duration);
+    let user = user_claims.clone();
+    let access_claims = Self { exp, user };
+
+    let exp = build_expiry(refresh_duration);
+    let user = user_claims;
+    let refresh_claims = Self { exp, user };
+
+    (access_claims, refresh_claims)
   }
 
-  fn from_token(secret: &str, token: &str) -> anyhow::Result<Self> {
+  fn into_token(&self, token_type: Token) -> anyhow::Result<String> {
+    let header = Header::default();
+    let secret = token_type.into_secret().as_bytes();
+    let secret = EncodingKey::from_secret(&secret);
+
+    encode(&header, self, &secret).map_err(anyhow::Error::from)
+  }
+
+  fn from_token(token_type: Token, token_value: &str) -> anyhow::Result<Self> {
     let validation = Validation::default();
-    let secret = secret.as_bytes();
+    let secret = token_type.into_secret().as_bytes();
     let secret = DecodingKey::from_secret(&secret);
 
-    jsonwebtoken::decode(token, &secret, &validation)
+    decode(token_value, &secret, &validation)
       .map(|data| data.claims)
       .map_err(anyhow::Error::from)
   }
 
-  fn into_token(&self, secret: &str) -> anyhow::Result<String> {
-    let header = Header::default();
-    let secret = secret.as_bytes();
-    let secret = EncodingKey::from_secret(&secret);
-
-    jsonwebtoken::encode(&header, self, &secret).map_err(anyhow::Error::from)
-  }
-
-  fn into_cookie<'l>(self, cookie_name: &'l str, token: String) -> anyhow::Result<Cookie<'l>> {
-    let base = Cookie::new(cookie_name, token);
+  fn into_cookie<'l>(
+    self,
+    cookie_name: &'l str,
+    token_value: String,
+  ) -> anyhow::Result<Cookie<'l>> {
+    let base = Cookie::new(cookie_name, token_value);
     let expiry = OffsetDateTime::from_unix_timestamp(self.exp as i64)?;
-
     let cookie = Cookie::build(base)
       .http_only(true)
       .secure(true)
@@ -124,7 +170,7 @@ impl Claims {
   }
 }
 
-pub async fn index(Extension(user): Extension<Claims>) -> HandlerResult<impl IntoResponse> {
+pub async fn index(Extension(user): Extension<UserContext>) -> HandlerResult<impl IntoResponse> {
   Ok(user.first_name)
 }
 
@@ -137,26 +183,24 @@ pub struct LoginPayload {
 pub async fn login(
   cookies: Cookies,
   State(pool): State<Arc<PgPool>>,
-  Json(payload): Json<LoginPayload>,
+  Json(body): Json<LoginPayload>,
 ) -> HandlerResult<impl IntoResponse> {
-  if cookies.get(ACCESS_COOKIE_NAME).is_some() {
+  if cookies.get(Token::ACCESS_COOKIE_NAME).is_some() {
     return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
   }
 
-  let user = get_user_by_name(&pool, &payload.first_name).await?;
-  let first_name = &user.first_name;
+  let user = get_user_by_name(&pool, &body.first_name).await?;
+  let first_name = user.first_name.clone();
 
-  let access_claims = Claims::new(ACCESS_COOKIE_NAME, first_name);
-  let access_token = access_claims.into_token(&*ACCESS_SECRET)?;
-  let refresh_claims = Claims::new(REFRESH_COOKIE_NAME, first_name);
-  let refresh_token = refresh_claims.into_token(&*REFRESH_SECRET)?;
+  let user_context = UserContext { first_name };
+  let (access_claims, refresh_claims) = Claims::new_pair(user_context);
+  let access_token = access_claims.into_token(Token::Access)?;
+  let refresh_token = refresh_claims.into_token(Token::Refresh)?;
 
-  // The refresh token stored will be checked for when generating a new access
-  // token from an existing refresh token.
-  set_refresh_token_by_name(&pool, &refresh_token, first_name).await?;
+  set_refresh_token_by_name(&pool, &refresh_token, &user.first_name).await?;
 
-  let access_cookie = access_claims.into_cookie(ACCESS_COOKIE_NAME, access_token)?;
-  let refresh_cookie = refresh_claims.into_cookie(REFRESH_COOKIE_NAME, refresh_token)?;
+  let access_cookie = access_claims.into_cookie(Token::ACCESS_COOKIE_NAME, access_token)?;
+  let refresh_cookie = refresh_claims.into_cookie(Token::REFRESH_COOKIE_NAME, refresh_token)?;
   cookies.add(access_cookie);
   cookies.add(refresh_cookie);
 
@@ -169,34 +213,30 @@ pub async fn protected(
   mut request: Request,
   next: Next,
 ) -> HandlerResult<impl IntoResponse> {
-  let refresh_token_from_cookie = cookies
-    .get(REFRESH_COOKIE_NAME)
+  let existing_refresh_token = cookies
+    .get(Token::REFRESH_COOKIE_NAME)
     .ok_or(StatusCode::UNAUTHORIZED)?
     .value()
     .to_string();
 
-  let refresh_claims = Claims::from_token(&*REFRESH_SECRET, &refresh_token_from_cookie)?;
-  let first_name = &refresh_claims.first_name;
+  let existing_claims = Claims::from_token(Token::Refresh, &existing_refresh_token)?;
+  if cookies.get(Token::ACCESS_COOKIE_NAME).is_none() {
+    let first_name = existing_claims.user.first_name.clone();
+    let user_context = UserContext { first_name };
 
-  // At this point, we have a valid decoded refresh token so a missing access
-  // token can be replaced using said decoded data.
-  if cookies.get(ACCESS_COOKIE_NAME).is_none() {
-    let access_claims = Claims::new(ACCESS_COOKIE_NAME, first_name);
-    let access_token = access_claims.into_token(&*ACCESS_SECRET)?;
-    let refresh_claims = Claims::new(REFRESH_COOKIE_NAME, first_name);
-    let refresh_token = refresh_claims.into_token(&*REFRESH_SECRET)?;
+    let (access_claims, refresh_claims) = Claims::new_pair(user_context);
+    let access_token = access_claims.into_token(Token::Access)?;
+    let refresh_token = refresh_claims.into_token(Token::Refresh)?;
 
-    // Whenever the access token needs to be generated we also generate a new
-    // refresh token. Then stored to ensure the old one expires.
-    update_refresh_token(&pool, &refresh_token, &refresh_token_from_cookie).await?;
+    update_refresh_token(&pool, &refresh_token, &existing_refresh_token).await?;
 
-    let access_cookie = access_claims.into_cookie(ACCESS_COOKIE_NAME, access_token)?;
-    let refresh_cookie = refresh_claims.into_cookie(REFRESH_COOKIE_NAME, refresh_token)?;
+    let access_cookie = access_claims.into_cookie(Token::ACCESS_COOKIE_NAME, access_token)?;
+    let refresh_cookie = refresh_claims.into_cookie(Token::REFRESH_COOKIE_NAME, refresh_token)?;
     cookies.add(access_cookie);
     cookies.add(refresh_cookie);
   }
 
-  request.extensions_mut().insert(refresh_claims);
+  request.extensions_mut().insert(existing_claims.user);
   Ok(next.run(request).await)
 }
 
@@ -207,7 +247,7 @@ async fn get_user_by_name(pool: &PgPool, name: &str) -> HandlerResult<User> {
     LIMIT 1
   "#;
 
-  sqlx::query_as(statement)
+  query_as(statement)
     .bind(name)
     .fetch_one(pool)
     .await
@@ -225,7 +265,7 @@ async fn set_refresh_token_by_name(
     WHERE first_name = $2
   "#;
 
-  sqlx::query(statement)
+  query(statement)
     .bind(token)
     .bind(name)
     .execute(pool)
@@ -244,7 +284,7 @@ async fn update_refresh_token(
     WHERE refresh_token = $2
   "#;
 
-  sqlx::query(statement)
+  query(statement)
     .bind(new_token)
     .bind(old_token)
     .execute(pool)
@@ -259,38 +299,38 @@ mod tests {
   use axum_test::TestResponse;
   use axum_test::TestServer;
   use serde_json::Value;
+  use serde_json::json;
 
   use crate::create_app;
   use crate::setup_logging;
 
   use super::*;
 
-  static LOGGING_INITIALISED: Once = Once::new();
+  static BEFORE_ALL: Once = Once::new();
 
   async fn setup() -> TestServer {
-    LOGGING_INITIALISED.call_once(setup_logging);
+    BEFORE_ALL.call_once(setup_logging);
 
     let app = create_app().await.unwrap();
     TestServer::builder().build(app).unwrap()
   }
 
   fn valid_payload() -> Value {
-    serde_json::json!({ "firstName": "Alice" })
+    json!({ "firstName": "Alice" })
   }
 
-  fn assert_cookies(response: &TestResponse, exists: bool) {
-    let access_cookie = response.maybe_cookie(ACCESS_COOKIE_NAME);
-    let refresh_cookie = response.maybe_cookie(REFRESH_COOKIE_NAME);
+  fn assert_cookies(response: &TestResponse, should_exist: bool) {
+    let access_cookie = response.maybe_cookie(Token::ACCESS_COOKIE_NAME);
+    let refresh_cookie = response.maybe_cookie(Token::REFRESH_COOKIE_NAME);
 
-    assert_eq!(access_cookie.is_some(), exists);
-    assert_eq!(refresh_cookie.is_some(), exists);
+    assert_eq!(access_cookie.is_some(), should_exist);
+    assert_eq!(refresh_cookie.is_some(), should_exist);
   }
 
   #[tokio::test]
   async fn login_valid_body() {
     let server = setup().await;
     let payload = valid_payload();
-
     let response = server.post("/login").json(&payload).await;
 
     assert_cookies(&response, true);
@@ -300,8 +340,7 @@ mod tests {
   #[tokio::test]
   async fn login_invalid_body() {
     let server = setup().await;
-    let payload = serde_json::json!({ "foo": "bar" });
-
+    let payload = json!({ "foo": "bar" });
     let response = server.post("/login").json(&payload).expect_failure().await;
 
     assert_cookies(&response, false);
@@ -311,7 +350,6 @@ mod tests {
   #[tokio::test]
   async fn unauthenticated_protected_route() {
     let server = setup().await;
-
     let response = server.get("/").await;
 
     assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
@@ -325,6 +363,7 @@ mod tests {
     server.post("/login").json(&payload).save_cookies().await;
     let response = server.get("/").await;
 
+    assert_eq!(response.text(), "Alice".to_string());
     assert_eq!(response.status_code(), StatusCode::OK);
   }
 
@@ -334,7 +373,7 @@ mod tests {
     let payload = valid_payload();
 
     let response = server.post("/login").json(&payload).await;
-    let refresh_cookie = response.cookie(REFRESH_COOKIE_NAME);
+    let refresh_cookie = response.cookie(Token::REFRESH_COOKIE_NAME);
     let response = server
       .get("/")
       .add_cookie(refresh_cookie)
@@ -346,12 +385,12 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn missing_refresh_token_with_access_token() {
+  async fn missing_refresh_token_protected_route() {
     let server = setup().await;
     let payload = valid_payload();
 
     let response = server.post("/login").json(&payload).await;
-    response.cookies().force_remove(REFRESH_COOKIE_NAME);
+    response.cookies().force_remove(Token::REFRESH_COOKIE_NAME);
     let response = server.get("/").expect_failure().await;
 
     assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
