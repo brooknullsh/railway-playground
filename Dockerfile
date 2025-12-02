@@ -1,22 +1,13 @@
-FROM rust:alpine AS builder
+FROM golang:alpine AS builder
 WORKDIR /app
 
-ARG LOG_LEVEL
-ARG DATABASE_URL
-ARG PORT
-ARG ACCESS_SECRET
-ARG JWT_SECRET
+COPY go.mod go.sum main.go ./
+COPY internal              ./internal
 
-RUN apk add --no-cache musl-dev
-RUN cargo init --bin --vcs none
-
-COPY Cargo* .
-COPY src    ./src
-
-RUN cargo build -r
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o railway-playground
 
 FROM scratch
 
-COPY --from=builder /app/target/release/railway-playground .
+COPY --from=builder /app/railway-playground .
 
 CMD ["/railway-playground"]
