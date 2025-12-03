@@ -22,24 +22,36 @@ func init() {
   slog.SetDefault(logger)
 }
 
-func main() {
+func initialiseHandlers(app *fiber.App) {
   store, err := store.NewAndConnect()
   if err != nil {
     slog.Error("creating the store", "error", err)
     os.Exit(1)
   }
 
-  app := fiber.New()
-  handler.InitialiseWithState(app, store)
+  app.State().Set("store", store)
+  app.Get("/", handler.Root)
+}
 
-  var port string
-  if port = os.Getenv("PORT"); port == "" {
-    port = ":8080"
+func initialiseListener(port *string, config *fiber.ListenConfig) {
+  if *port = os.Getenv("PORT"); *port == "" {
+    *port = ":8080"
   } else {
-    port = ":" + port
+    *port = ":" + *port
   }
 
-  if err := app.Listen(port); err != nil {
+  config.DisableStartupMessage = true
+}
+
+func main() {
+  app := fiber.New()
+  initialiseHandlers(app)
+
+  var port string
+  var config fiber.ListenConfig
+  initialiseListener(&port, &config)
+
+  if err := app.Listen(port, config); err != nil {
     slog.Error("starting server", "error", err)
     os.Exit(1)
   }

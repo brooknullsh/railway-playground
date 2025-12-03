@@ -10,17 +10,16 @@ import (
 )
 
 type Store struct {
-  User *UserStore
   pool *pgxpool.Pool
 }
 
 func NewAndConnect() (*Store, error) {
-  var connection string
-  if connection = os.Getenv("DATABASE_URL"); connection == "" {
+  var conn string
+  if conn = os.Getenv("DATABASE_URL"); conn == "" {
     return nil, errors.New("missing DATABASE_URL environment variable")
   }
 
-  config, err := pgxpool.ParseConfig(connection)
+  config, err := pgxpool.ParseConfig(conn)
   if err != nil {
     return nil, fmt.Errorf("creating database configuration: %v", err)
   }
@@ -38,5 +37,5 @@ func NewAndConnect() (*Store, error) {
     return nil, fmt.Errorf("pinging database: %v", err)
   }
 
-  return &Store{&UserStore{pool}, pool}, nil
+  return &Store{pool}, nil
 }

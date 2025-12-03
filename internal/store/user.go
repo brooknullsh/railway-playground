@@ -9,12 +9,7 @@ import (
 
   "github.com/gofiber/fiber/v3"
   "github.com/jackc/pgx/v5"
-  "github.com/jackc/pgx/v5/pgxpool"
 )
-
-type UserStore struct {
-  pool *pgxpool.Pool
-}
 
 type User struct {
   Id           int            `db:"id"            json:"id"`
@@ -28,17 +23,17 @@ type User struct {
   RefreshToken sql.NullString `db:"refresh_token" json:"refreshToken"`
 }
 
-func (this *UserStore) GetByName(ctx fiber.Ctx, name string) (*User, int) {
+func (this *Store) GetUserByName(ctx fiber.Ctx, name string) (*User, int) {
   statement := `
   SELECT * FROM users
   WHERE first_name = $1
   LIMIT 1
   `
 
-  row, _ := this.pool.Query(ctx, statement, name)
-  defer row.Close()
+  rows, _ := this.pool.Query(ctx, statement, name)
+  defer rows.Close()
 
-  user, err := pgx.CollectOneRow(row, pgx.RowToStructByName[User])
+  user, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[User])
   if err != nil {
     if errors.Is(err, pgx.ErrNoRows) {
       return nil, http.StatusNotFound

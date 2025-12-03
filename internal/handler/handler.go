@@ -7,18 +7,13 @@ import (
   "github.com/gofiber/fiber/v3"
 )
 
-func InitialiseWithState(app *fiber.App, store *store.Store) {
-  index := IndexHandler{store}
+func Root(ctx fiber.Ctx) error {
+  store, cast := fiber.GetState[*store.Store](ctx.App().State(), "store")
+  if !cast {
+    return ctx.SendStatus(http.StatusInternalServerError)
+  }
 
-  app.Get("/", index.Root)
-}
-
-type IndexHandler struct {
-  store *store.Store
-}
-
-func (this *IndexHandler) Root(ctx fiber.Ctx) error {
-  user, code := this.store.User.GetByName(ctx, "Alice")
+  user, code := store.GetUserByName(ctx, "Alice")
   if code != http.StatusOK {
     return ctx.SendStatus(code)
   }
