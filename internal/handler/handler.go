@@ -7,8 +7,10 @@ import (
   "github.com/gofiber/fiber/v3"
 )
 
-func Root(ctx fiber.Ctx) error {
-  store, cast := fiber.GetState[*store.Store](ctx.App().State(), "store")
+const StoreKey = "store"
+
+func Index(ctx fiber.Ctx) error {
+  store, cast := fiber.GetState[*store.Store](ctx.App().State(), StoreKey)
   if !cast {
     return ctx.SendStatus(http.StatusInternalServerError)
   }

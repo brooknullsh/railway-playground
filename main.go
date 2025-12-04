@@ -3,6 +3,7 @@ package main
 import (
   "log/slog"
   "os"
+  "strings"
   "time"
 
   "github.com/brooknullsh/railway-playground/internal/handler"
@@ -12,44 +13,50 @@ import (
 )
 
 func init() {
-  opts := tint.Options{
-    Level:      slog.LevelDebug,
-    TimeFormat: time.Kitchen,
+  var level slog.Level
+  envLevel := os.Getenv("LOG_LEVEL")
+  switch strings.ToLower(envLevel) {
+  case "debug":
+    level = slog.LevelDebug
+  case "info":
+    level = slog.LevelInfo
+  case "warn":
+    level = slog.LevelWarn
+  case "error":
+    level = slog.LevelError
+  default:
+    level = slog.LevelDebug
   }
+
+  var opts tint.Options
+  opts.Level = level
+  opts.TimeFormat = time.Kitchen
 
   overwrite := tint.NewHandler(os.Stderr, &opts)
   logger := slog.New(overwrite)
   slog.SetDefault(logger)
 }
 
-func initialiseHandlers(app *fiber.App) {
-  store, err := store.NewAndConnect()
+func main() {
+  store, err := store.New()
   if err != nil {
     slog.Error("creating the store", "error", err)
     os.Exit(1)
   }
 
-  app.State().Set("store", store)
-  app.Get("/", handler.Root)
-}
-
-func initialiseListener(port *string, config *fiber.ListenConfig) {
-  if *port = os.Getenv("PORT"); *port == "" {
-    *port = ":8080"
-  } else {
-    *port = ":" + *port
-  }
-
-  config.DisableStartupMessage = true
-}
-
-func main() {
   app := fiber.New()
-  initialiseHandlers(app)
+  app.State().Set(handler.StoreKey, &store)
+  app.Get("/", handler.Index)
 
   var port string
+  if port = os.Getenv("PORT"); port == "" {
+    port = ":8080"
+  } else {
+    port = ":" + port
+  }
+
   var config fiber.ListenConfig
-  initialiseListener(&port, &config)
+  config.DisableStartupMessage = true
 
   if err := app.Listen(port, config); err != nil {
     slog.Error("starting server", "error", err)

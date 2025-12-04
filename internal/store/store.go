@@ -13,15 +13,17 @@ type Store struct {
   pool *pgxpool.Pool
 }
 
-func NewAndConnect() (*Store, error) {
+func New() (Store, error) {
+  var storeZero Store
+
   var conn string
   if conn = os.Getenv("DATABASE_URL"); conn == "" {
-    return nil, errors.New("missing DATABASE_URL environment variable")
+    return storeZero, errors.New("missing DATABASE_URL environment variable")
   }
 
   config, err := pgxpool.ParseConfig(conn)
   if err != nil {
-    return nil, fmt.Errorf("creating database configuration: %v", err)
+    return storeZero, fmt.Errorf("creating database configuration: %v", err)
   }
 
   config.MaxConns = 20
@@ -30,12 +32,12 @@ func NewAndConnect() (*Store, error) {
 
   pool, err := pgxpool.NewWithConfig(ctx, config)
   if err != nil {
-    return nil, fmt.Errorf("creating database pool: %v", err)
+    return storeZero, fmt.Errorf("creating database pool: %v", err)
   }
 
   if err := pool.Ping(ctx); err != nil {
-    return nil, fmt.Errorf("pinging database: %v", err)
+    return storeZero, fmt.Errorf("pinging database: %v", err)
   }
 
-  return &Store{pool}, nil
+  return Store{pool}, nil
 }

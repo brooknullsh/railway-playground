@@ -23,7 +23,7 @@ type User struct {
   RefreshToken sql.NullString `db:"refresh_token" json:"refreshToken"`
 }
 
-func (this *Store) GetUserByName(ctx fiber.Ctx, name string) (*User, int) {
+func (this *Store) GetUserByName(ctx fiber.Ctx, name string) (User, int) {
   statement := `
   SELECT * FROM users
   WHERE first_name = $1
@@ -36,12 +36,12 @@ func (this *Store) GetUserByName(ctx fiber.Ctx, name string) (*User, int) {
   user, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[User])
   if err != nil {
     if errors.Is(err, pgx.ErrNoRows) {
-      return nil, http.StatusNotFound
+      return user, http.StatusNotFound
     }
 
     slog.Error("finding user by name", "name", name, "error", err)
-    return nil, http.StatusInternalServerError
+    return user, http.StatusInternalServerError
   }
 
-  return &user, http.StatusOK
+  return user, http.StatusOK
 }
