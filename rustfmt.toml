@@ -1,3 +1,5 @@
 tab_spaces = 2
-use_field_init_shorthand = true
 imports_granularity = "Item"
+brace_style = "AlwaysNextLine"
+use_field_init_shorthand = true
+control_brace_style = "AlwaysNextLine"

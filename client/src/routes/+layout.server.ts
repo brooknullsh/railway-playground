@@ -10,14 +10,16 @@ type User = {
   firstName: string
 }
 
-async function fetchAllUsers() {
+async function fetchAllUsers()
+{
   const response = await fetch(`${env.SERVER_URL}/`)
 
   console.log(await response.text())
   // return response.json() as Promise<User[]>
 }
 
-async function fetchUser() {
+async function fetchUser()
+{
   const response = await fetch(`${env.SERVER_URL}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -28,6 +30,7 @@ async function fetchUser() {
   // return response.json() as Promise<User>
 }
 
-export const load: LayoutServerLoad = async () => {
+export const load: LayoutServerLoad = async () =>
+{
   return { users: fetchUser() }
 }

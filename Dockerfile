@@ -1,12 +1,6 @@
 FROM rust:alpine AS builder
 WORKDIR /app
 
-ARG LOG_LEVEL
-ARG DATABASE_URL
-ARG PORT
-ARG ACCESS_SECRET
-ARG JWT_SECRET
-
 RUN apk add --no-cache musl-dev
 RUN cargo init --bin --vcs none
 

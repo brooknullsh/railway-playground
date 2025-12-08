@@ -1,5 +1,4 @@
 use std::ops::Add;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -12,8 +11,6 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use chrono::DateTime;
-use chrono::Utc;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::EncodingKey;
 use jsonwebtoken::Header;
@@ -24,250 +21,254 @@ use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
 use sqlx::postgres::PgQueryResult;
-use sqlx::prelude::FromRow;
 use sqlx::query;
-use sqlx::query_as;
+use sqlx::query_scalar;
 use tower_cookies::Cookie;
 use tower_cookies::Cookies;
 use tower_cookies::cookie::time::OffsetDateTime;
 use tracing::error;
 
-#[derive(Serialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-struct User {
-  id: i32,
-  age: i32,
-  is_pro: bool,
-  mobile: String,
-  last_name: String,
-  first_name: String,
-  refresh_token: Option<String>,
-  created_at: DateTime<Utc>,
-  updated_at: DateTime<Utc>,
-}
+use crate::AppState;
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct UserContext {
-  first_name: String,
-}
+const ACCESS_COOKIE: &str = "access_token";
+const REFRESH_COOKIE: &str = "refresh_token";
 
 pub struct HandlerError(StatusCode);
 type HandlerResult<T> = Result<T, HandlerError>;
 
-impl IntoResponse for HandlerError {
-  fn into_response(self) -> Response {
+impl IntoResponse for HandlerError
+{
+  fn into_response(self) -> Response
+  {
     self.0.into_response()
   }
 }
 
-impl From<StatusCode> for HandlerError {
-  fn from(code: StatusCode) -> Self {
+impl From<StatusCode> for HandlerError
+{
+  fn from(code: StatusCode) -> Self
+  {
     Self(code)
   }
 }
 
-impl From<sqlx::Error> for HandlerError {
-  fn from(err: sqlx::Error) -> Self {
+impl From<sqlx::Error> for HandlerError
+{
+  fn from(err: sqlx::Error) -> Self
+  {
     error!("[DATABASE] {err}");
     Self(StatusCode::INTERNAL_SERVER_ERROR)
   }
 }
 
-impl From<anyhow::Error> for HandlerError {
-  fn from(err: anyhow::Error) -> Self {
+impl From<anyhow::Error> for HandlerError
+{
+  fn from(err: anyhow::Error) -> Self
+  {
     error!("[UNEXPECTED] {err}");
     Self(StatusCode::INTERNAL_SERVER_ERROR)
   }
 }
 
-enum Token {
+enum Token
+{
   Access,
   Refresh,
 }
 
-impl Token {
-  const ACCESS_COOKIE_NAME: &str = "access_token";
-  const REFRESH_COOKIE_NAME: &str = "refresh_token";
-
-  const fn into_secret(self) -> &'static str {
-    match self {
-      Self::Access => env!("ACCESS_SECRET"),
-      Self::Refresh => env!("REFRESH_SECRET"),
-    }
-  }
-
-  const fn lifetime(self) -> Duration {
-    match self {
-      Self::Access => Duration::from_secs(1_800),
-      Self::Refresh => Duration::from_secs(2_592_000),
-    }
-  }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct UserExtension
+{
+  id: i32,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Claims {
+pub struct Claims
+{
   exp: u64,
-  user: UserContext,
+  user: UserExtension,
 }
 
-impl Claims {
-  fn new_pair(user_claims: UserContext) -> (Self, Self) {
+impl Claims
+{
+  fn new_pair(user_ext: UserExtension) -> (Self, Self)
+  {
     let now = SystemTime::now();
-    let access_duration = Token::Access.lifetime();
-    let refresh_duration = Token::Refresh.lifetime();
+    let acc_lifetime = Duration::from_secs(1_800);
+    let ref_lifetime = Duration::from_secs(2_592_000);
 
-    let build_expiry = |duration: Duration| {
+    let build_exp = |lifetime: Duration| {
       now
-        .add(duration)
+        .add(lifetime)
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
     };
 
-    let exp = build_expiry(access_duration);
-    let user = user_claims.clone();
-    let access_claims = Self { exp, user };
+    let exp = build_exp(acc_lifetime);
+    let user = user_ext.clone();
+    let acc_claims = Self { user, exp };
 
-    let exp = build_expiry(refresh_duration);
-    let user = user_claims;
-    let refresh_claims = Self { exp, user };
+    let exp = build_exp(ref_lifetime);
+    let user = user_ext;
+    let ref_claims = Self { user, exp };
 
-    (access_claims, refresh_claims)
+    (acc_claims, ref_claims)
   }
 
-  fn into_token(&self, token_type: Token) -> anyhow::Result<String> {
-    let header = Header::default();
-    let secret = token_type.into_secret().as_bytes();
+  fn into_token(&self, state: &AppState, token: Token) -> anyhow::Result<String>
+  {
+    let secret = match token
+    {
+      Token::Access => state.acc_secret.as_bytes(),
+      Token::Refresh => state.ref_secret.as_bytes(),
+    };
+
+    let head = Header::default();
     let secret = EncodingKey::from_secret(&secret);
 
-    encode(&header, self, &secret).map_err(anyhow::Error::from)
+    encode(&head, self, &secret).map_err(anyhow::Error::from)
   }
 
-  fn from_token(token_type: Token, token_value: &str) -> anyhow::Result<Self> {
-    let validation = Validation::default();
-    let secret = token_type.into_secret().as_bytes();
+  fn from_token(state: &AppState, token: Token, value: &str) -> anyhow::Result<Self>
+  {
+    let secret = match token
+    {
+      Token::Access => state.acc_secret.as_bytes(),
+      Token::Refresh => state.ref_secret.as_bytes(),
+    };
+
+    let val = Validation::default();
     let secret = DecodingKey::from_secret(&secret);
 
-    decode(token_value, &secret, &validation)
+    decode(value, &secret, &val)
       .map(|data| data.claims)
       .map_err(anyhow::Error::from)
   }
 
-  fn into_cookie<'l>(
-    self,
-    cookie_name: &'l str,
-    token_value: String,
-  ) -> anyhow::Result<Cookie<'l>> {
-    let base = Cookie::new(cookie_name, token_value);
-    let expiry = OffsetDateTime::from_unix_timestamp(self.exp as i64)?;
-    let cookie = Cookie::build(base)
+  fn into_cookie<'l>(self, name: &'static str, value: String) -> Cookie<'l>
+  {
+    let base = Cookie::new(name, value);
+    let now = OffsetDateTime::now_utc();
+    let exp = OffsetDateTime::from_unix_timestamp(self.exp as i64).unwrap_or(now);
+
+    Cookie::build(base)
       .http_only(true)
       .secure(true)
-      .expires(expiry)
-      .build();
-
-    Ok(cookie)
+      .expires(exp)
+      .build()
   }
 }
 
-pub async fn index(Extension(user): Extension<UserContext>) -> HandlerResult<impl IntoResponse> {
-  Ok(user.first_name)
+pub async fn index(Extension(user): Extension<UserExtension>) -> HandlerResult<impl IntoResponse>
+{
+  let id_str = user.id.to_string();
+  Ok(id_str)
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoginPayload {
-  first_name: String,
+pub struct LoginBody
+{
+  id: i32,
 }
 
 pub async fn login(
   cookies: Cookies,
-  State(pool): State<Arc<PgPool>>,
-  Json(body): Json<LoginPayload>,
-) -> HandlerResult<impl IntoResponse> {
-  if cookies.get(Token::ACCESS_COOKIE_NAME).is_some() {
+  State(state): State<AppState>,
+  Json(body): Json<LoginBody>,
+) -> HandlerResult<impl IntoResponse>
+{
+  if cookies.get(ACCESS_COOKIE).is_some()
+  {
     return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
   }
 
-  let user = get_user_by_name(&pool, &body.first_name).await?;
-  let first_name = user.first_name.clone();
+  if !user_by_id_exists(&state.pool, body.id).await?
+  {
+    return Err(StatusCode::NOT_FOUND).map_err(HandlerError::from);
+  }
 
-  let user_context = UserContext { first_name };
-  let (access_claims, refresh_claims) = Claims::new_pair(user_context);
-  let access_token = access_claims.into_token(Token::Access)?;
-  let refresh_token = refresh_claims.into_token(Token::Refresh)?;
+  let user_ext = UserExtension { id: body.id };
+  let (acc_claims, ref_claims) = Claims::new_pair(user_ext);
+  let acc_token = acc_claims.into_token(&state, Token::Access)?;
+  let ref_token = ref_claims.into_token(&state, Token::Refresh)?;
 
-  set_refresh_token_by_name(&pool, &refresh_token, &user.first_name).await?;
+  set_refresh_token_by_id(&state.pool, &ref_token, body.id).await?;
 
-  let access_cookie = access_claims.into_cookie(Token::ACCESS_COOKIE_NAME, access_token)?;
-  let refresh_cookie = refresh_claims.into_cookie(Token::REFRESH_COOKIE_NAME, refresh_token)?;
-  cookies.add(access_cookie);
-  cookies.add(refresh_cookie);
+  let acc_cookie = acc_claims.into_cookie(ACCESS_COOKIE, acc_token);
+  let ref_cookie = ref_claims.into_cookie(REFRESH_COOKIE, ref_token);
+  cookies.add(acc_cookie);
+  cookies.add(ref_cookie);
 
   Ok(StatusCode::OK)
 }
 
-pub async fn protected(
+pub async fn auth(
   cookies: Cookies,
-  State(pool): State<Arc<PgPool>>,
-  mut request: Request,
+  State(state): State<AppState>,
+  mut req: Request,
   next: Next,
-) -> HandlerResult<impl IntoResponse> {
-  let existing_refresh_token = cookies
-    .get(Token::REFRESH_COOKIE_NAME)
+) -> HandlerResult<impl IntoResponse>
+{
+  let curr_ref_token = cookies
+    .get(REFRESH_COOKIE)
     .ok_or(StatusCode::UNAUTHORIZED)?
     .value()
     .to_string();
 
-  let existing_claims = Claims::from_token(Token::Refresh, &existing_refresh_token)?;
-  if cookies.get(Token::ACCESS_COOKIE_NAME).is_none() {
-    let first_name = existing_claims.user.first_name.clone();
-    let user_context = UserContext { first_name };
+  let curr_ref_claims = Claims::from_token(&state, Token::Refresh, &curr_ref_token)?;
+  if cookies.get(ACCESS_COOKIE).is_none()
+  {
+    let id = curr_ref_claims.user.id;
+    let user_ext = UserExtension { id };
 
-    let (access_claims, refresh_claims) = Claims::new_pair(user_context);
-    let access_token = access_claims.into_token(Token::Access)?;
-    let refresh_token = refresh_claims.into_token(Token::Refresh)?;
+    let (acc_claims, ref_claims) = Claims::new_pair(user_ext);
+    let acc_token = acc_claims.into_token(&state, Token::Access)?;
+    let ref_token = ref_claims.into_token(&state, Token::Refresh)?;
 
-    update_refresh_token(&pool, &refresh_token, &existing_refresh_token).await?;
+    update_refresh_token(&state.pool, &ref_token, &curr_ref_token).await?;
 
-    let access_cookie = access_claims.into_cookie(Token::ACCESS_COOKIE_NAME, access_token)?;
-    let refresh_cookie = refresh_claims.into_cookie(Token::REFRESH_COOKIE_NAME, refresh_token)?;
-    cookies.add(access_cookie);
-    cookies.add(refresh_cookie);
+    let acc_cookie = acc_claims.into_cookie(ACCESS_COOKIE, acc_token);
+    let ref_cookie = ref_claims.into_cookie(REFRESH_COOKIE, ref_token);
+    cookies.add(acc_cookie);
+    cookies.add(ref_cookie);
   }
 
-  request.extensions_mut().insert(existing_claims.user);
-  Ok(next.run(request).await)
+  req.extensions_mut().insert(curr_ref_claims.user);
+  Ok(next.run(req).await)
 }
 
-async fn get_user_by_name(pool: &PgPool, name: &str) -> HandlerResult<User> {
-  let statement = r#"
-    SELECT * FROM users
-    WHERE first_name = $1
-    LIMIT 1
+async fn user_by_id_exists(pool: &PgPool, id: i32) -> HandlerResult<bool>
+{
+  let stmt = r#"
+    SELECT EXISTS (
+      SELECT 1 FROM users
+      WHERE id = $1
+    )
   "#;
 
-  query_as(statement)
-    .bind(name)
+  query_scalar(stmt)
+    .bind(id)
     .fetch_one(pool)
     .await
     .map_err(HandlerError::from)
 }
 
-async fn set_refresh_token_by_name(
+async fn set_refresh_token_by_id(
   pool: &PgPool,
   token: &str,
-  name: &str,
-) -> HandlerResult<PgQueryResult> {
-  let statement = r#"
+  id: i32,
+) -> HandlerResult<PgQueryResult>
+{
+  let stmt = r#"
     UPDATE users
     SET refresh_token = $1
-    WHERE first_name = $2
+    WHERE id = $2
   "#;
 
-  query(statement)
+  query(stmt)
     .bind(token)
-    .bind(name)
+    .bind(id)
     .execute(pool)
     .await
     .map_err(HandlerError::from)
@@ -277,14 +278,15 @@ async fn update_refresh_token(
   pool: &PgPool,
   new_token: &str,
   old_token: &str,
-) -> HandlerResult<PgQueryResult> {
-  let statement = r#"
+) -> HandlerResult<PgQueryResult>
+{
+  let stmt = r#"
     UPDATE users
     SET refresh_token = $1
     WHERE refresh_token = $2
   "#;
 
-  query(statement)
+  query(stmt)
     .bind(new_token)
     .bind(old_token)
     .execute(pool)
@@ -293,12 +295,12 @@ async fn update_refresh_token(
 }
 
 #[cfg(test)]
-mod tests {
+mod tests
+{
   use std::sync::Once;
 
   use axum_test::TestResponse;
   use axum_test::TestServer;
-  use serde_json::Value;
   use serde_json::json;
 
   use crate::create_app;
@@ -308,91 +310,103 @@ mod tests {
 
   static BEFORE_ALL: Once = Once::new();
 
-  async fn setup() -> TestServer {
+  async fn setup() -> TestServer
+  {
     BEFORE_ALL.call_once(setup_logging);
 
     let app = create_app().await.unwrap();
     TestServer::builder().build(app).unwrap()
   }
 
-  fn valid_payload() -> Value {
-    json!({ "firstName": "Alice" })
-  }
+  fn assert_cookies(res: &TestResponse, exists: bool)
+  {
+    let acc_cookie = res.maybe_cookie(ACCESS_COOKIE);
+    let ref_cookie = res.maybe_cookie(REFRESH_COOKIE);
 
-  fn assert_cookies(response: &TestResponse, should_exist: bool) {
-    let access_cookie = response.maybe_cookie(Token::ACCESS_COOKIE_NAME);
-    let refresh_cookie = response.maybe_cookie(Token::REFRESH_COOKIE_NAME);
-
-    assert_eq!(access_cookie.is_some(), should_exist);
-    assert_eq!(refresh_cookie.is_some(), should_exist);
+    assert_eq!(acc_cookie.is_some(), exists);
+    assert_eq!(ref_cookie.is_some(), exists);
   }
 
   #[tokio::test]
-  async fn login_valid_body() {
-    let server = setup().await;
-    let payload = valid_payload();
-    let response = server.post("/login").json(&payload).await;
+  async fn login_valid_body()
+  {
+    let srvr = setup().await;
+    let body = json!({ "id": 1 });
+    let res = srvr.post("/login").json(&body).await;
 
-    assert_cookies(&response, true);
-    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_cookies(&res, true);
+    assert_eq!(res.status_code(), StatusCode::OK);
   }
 
   #[tokio::test]
-  async fn login_invalid_body() {
-    let server = setup().await;
-    let payload = json!({ "foo": "bar" });
-    let response = server.post("/login").json(&payload).expect_failure().await;
+  async fn login_invalid_body()
+  {
+    let srvr = setup().await;
+    let body = json!({ "foo": "bar" });
+    let res = srvr.post("/login").json(&body).expect_failure().await;
 
-    assert_cookies(&response, false);
-    assert_eq!(response.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_cookies(&res, false);
+    assert_eq!(res.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
   }
 
   #[tokio::test]
-  async fn unauthenticated_protected_route() {
-    let server = setup().await;
-    let response = server.get("/").await;
+  async fn login_unknown_body()
+  {
+    let srvr = setup().await;
+    let body = json!({ "id": 9999 });
+    let res = srvr.post("/login").json(&body).expect_failure().await;
 
-    assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+    assert_cookies(&res, false);
+    assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
   }
 
   #[tokio::test]
-  async fn authenticated_protected_route() {
-    let server = setup().await;
-    let payload = valid_payload();
+  async fn protected_authenticated()
+  {
+    let srvr = setup().await;
+    let body = json!({ "id": 1 });
 
-    server.post("/login").json(&payload).save_cookies().await;
-    let response = server.get("/").await;
+    srvr.post("/login").json(&body).save_cookies().await;
+    let res = srvr.get("/").await;
 
-    assert_eq!(response.text(), "Alice".to_string());
-    assert_eq!(response.status_code(), StatusCode::OK);
+    let exp_body = "1".to_string();
+    assert_eq!(res.text(), exp_body);
+    assert_eq!(res.status_code(), StatusCode::OK);
   }
 
   #[tokio::test]
-  async fn expired_access_token_protected_route() {
-    let server = setup().await;
-    let payload = valid_payload();
+  async fn protected_unauthenticated()
+  {
+    let srvr = setup().await;
+    let res = srvr.get("/").await;
 
-    let response = server.post("/login").json(&payload).await;
-    let refresh_cookie = response.cookie(Token::REFRESH_COOKIE_NAME);
-    let response = server
-      .get("/")
-      .add_cookie(refresh_cookie)
-      .save_cookies()
-      .await;
-
-    assert_cookies(&response, true);
-    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
   }
 
   #[tokio::test]
-  async fn missing_refresh_token_protected_route() {
-    let server = setup().await;
-    let payload = valid_payload();
+  async fn protected_expired_acc_token()
+  {
+    let srvr = setup().await;
+    let body = json!({ "id": 1 });
 
-    let response = server.post("/login").json(&payload).await;
-    response.cookies().force_remove(Token::REFRESH_COOKIE_NAME);
-    let response = server.get("/").expect_failure().await;
+    let res = srvr.post("/login").json(&body).await;
+    let ref_cookie = res.cookie(REFRESH_COOKIE);
+    let res = srvr.get("/").add_cookie(ref_cookie).save_cookies().await;
 
-    assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+    assert_cookies(&res, true);
+    assert_eq!(res.status_code(), StatusCode::OK);
+  }
+
+  #[tokio::test]
+  async fn protected_expired_ref_token()
+  {
+    let srvr = setup().await;
+    let body = json!({ "id": 1 });
+
+    let res = srvr.post("/login").json(&body).await;
+    res.cookies().force_remove(REFRESH_COOKIE);
+    let res = srvr.get("/").expect_failure().await;
+
+    assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
   }
 }
