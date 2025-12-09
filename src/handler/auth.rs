@@ -3,14 +3,12 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
-use axum::response::Response;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::EncodingKey;
 use jsonwebtoken::Header;
@@ -26,67 +24,31 @@ use sqlx::query_scalar;
 use tower_cookies::Cookie;
 use tower_cookies::Cookies;
 use tower_cookies::cookie::time::OffsetDateTime;
-use tracing::error;
 
 use crate::AppState;
-
-const ACCESS_COOKIE: &str = "access_token";
-const REFRESH_COOKIE: &str = "refresh_token";
-
-pub struct HandlerError(StatusCode);
-type HandlerResult<T> = Result<T, HandlerError>;
-
-impl IntoResponse for HandlerError {
-  fn into_response(self) -> Response {
-    self.0.into_response()
-  }
-}
-
-impl From<StatusCode> for HandlerError {
-  fn from(code: StatusCode) -> Self {
-    Self(code)
-  }
-}
-
-impl From<sqlx::Error> for HandlerError {
-  fn from(err: sqlx::Error) -> Self {
-    error!("[DATABASE] {err}");
-    Self(StatusCode::INTERNAL_SERVER_ERROR)
-  }
-}
-
-impl From<anyhow::Error> for HandlerError {
-  fn from(err: anyhow::Error) -> Self {
-    error!("[UNEXPECTED] {err}");
-    Self(StatusCode::INTERNAL_SERVER_ERROR)
-  }
-}
+use crate::handler::ACCESS_COOKIE;
+use crate::handler::HandlerError;
+use crate::handler::HandlerResult;
+use crate::handler::REFRESH_COOKIE;
+use crate::handler::UserState;
 
 enum Token {
   Access,
   Refresh,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct UserExtension {
-  id: i32,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
   exp: u64,
-  user: UserExtension,
+  user: UserState,
 }
 
 impl Claims {
   fn pair(id: i32) -> (Self, Self) {
     let now = SystemTime::now();
-    //     1_800s => 30m
-    // 2_592_000s => 30d
-    let acc_lifetime = Duration::from_secs(1_800);
-    let ref_lifetime = Duration::from_secs(2_592_000);
+    let acc_lifetime = Duration::from_secs(1_800); // 30m
+    let ref_lifetime = Duration::from_secs(2_592_000); // 30d
 
-    let user_ext = UserExtension { id };
     let build_exp = |lifetime: Duration| {
       now
         .add(lifetime)
@@ -96,17 +58,17 @@ impl Claims {
     };
 
     let exp = build_exp(acc_lifetime);
-    let user = user_ext.clone();
+    let user = UserState { id };
     let acc_claims = Self { user, exp };
 
     let exp = build_exp(ref_lifetime);
-    let user = user_ext;
+    let user = UserState { id };
     let ref_claims = Self { user, exp };
 
     (acc_claims, ref_claims)
   }
 
-  fn to_token(&self, state: &AppState, token: Token) -> anyhow::Result<String> {
+  fn into_token(&self, state: &AppState, token: Token) -> anyhow::Result<String> {
     let secret = match token {
       Token::Access => state.acc_secret.as_bytes(),
       Token::Refresh => state.ref_secret.as_bytes(),
@@ -132,7 +94,7 @@ impl Claims {
       .map_err(anyhow::Error::from)
   }
 
-  fn to_cookie(self, cookies: &mut Cookies, name: &'static str, value: String) {
+  fn into_cookie(self, cookies: &mut Cookies, name: &'static str, value: String) {
     let base = Cookie::new(name, value);
     let now = OffsetDateTime::now_utc();
     let exp = OffsetDateTime::from_unix_timestamp(self.exp as i64).unwrap_or(now);
@@ -145,11 +107,6 @@ impl Claims {
 
     cookies.add(cookie);
   }
-}
-
-pub async fn index(Extension(user): Extension<UserExtension>) -> HandlerResult<impl IntoResponse> {
-  let user_id = user.id.to_string();
-  Ok(user_id)
 }
 
 #[derive(Deserialize)]
@@ -174,7 +131,7 @@ pub async fn login(
   Ok(StatusCode::OK)
 }
 
-pub async fn auth(
+pub async fn protected(
   mut cookies: Cookies,
   State(state): State<AppState>,
   mut req: Request,
@@ -201,21 +158,21 @@ async fn create_new_tokens(
   id: i32,
 ) -> HandlerResult<()> {
   let (acc_claims, ref_claims) = Claims::pair(id);
-  let acc_token = acc_claims.to_token(&state, Token::Access)?;
-  let ref_token = ref_claims.to_token(&state, Token::Refresh)?;
+  let acc_token = acc_claims.into_token(&state, Token::Access)?;
+  let ref_token = ref_claims.into_token(&state, Token::Refresh)?;
 
   set_refresh_token_by_id(&state.pool, &ref_token, id).await?;
-  acc_claims.to_cookie(&mut cookies, ACCESS_COOKIE, acc_token);
-  ref_claims.to_cookie(&mut cookies, REFRESH_COOKIE, ref_token);
+  acc_claims.into_cookie(&mut cookies, ACCESS_COOKIE, acc_token);
+  ref_claims.into_cookie(&mut cookies, REFRESH_COOKIE, ref_token);
   Ok(())
 }
 
 async fn user_exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
   let stmt = r#"
-    SELECT EXISTS (
-      SELECT 1 FROM users
-      WHERE id = $1
-    )
+  SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE id = $1
+  )
   "#;
 
   query_scalar(stmt)
@@ -231,9 +188,9 @@ async fn set_refresh_token_by_id(
   id: i32,
 ) -> HandlerResult<PgQueryResult> {
   let stmt = r#"
-    UPDATE users
-    SET refresh_token = $1
-    WHERE id = $2
+  UPDATE users
+  SET refresh_token = $1
+  WHERE id = $2
   "#;
 
   query(stmt)

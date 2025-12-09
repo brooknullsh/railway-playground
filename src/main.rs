@@ -18,9 +18,9 @@ use tracing::error;
 use tracing::info;
 use tracing_subscriber::fmt;
 
-use crate::handler::auth;
+use crate::handler::auth::login;
+use crate::handler::auth::protected;
 use crate::handler::index;
-use crate::handler::login;
 
 mod handler;
 
@@ -58,7 +58,7 @@ async fn create_app() -> anyhow::Result<Router> {
     ref_secret,
   };
 
-  let auth_ware = from_fn_with_state(state.clone(), auth);
+  let auth_ware = from_fn_with_state(state.clone(), protected);
   let trace_lyr = TraceLayer::new_for_http();
   let cookie_lyr = CookieManagerLayer::new();
 
