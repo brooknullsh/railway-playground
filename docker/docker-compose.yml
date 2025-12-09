@@ -26,7 +26,10 @@ services:
       - REFRESH_SECRET=refresh_secret
     volumes:
       # Source files for hot-reloading.
-      - ../src:/app/src
+      - ../go.mod:/app/go.mod
+      - ../go.sum:/app/go.sum
+      - ../main.go:/app/main.go
+      - ../internal:/app/internal
 
   client:
     restart: on-failure

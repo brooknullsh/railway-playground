@@ -1,16 +1,13 @@
-FROM rust:alpine AS builder
+FROM golang:alpine AS builder
 WORKDIR /app
 
-RUN apk add --no-cache musl-dev
-RUN cargo init --bin --vcs none
+COPY go.mod go.sum main.go ./
+COPY internal/             ./internal
 
-COPY Cargo* .
-COPY src    ./src
-
-RUN cargo build -r
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o server
 
 FROM scratch
 
-COPY --from=builder /app/target/release/railway-playground .
+COPY --from=builder /app/server .
 
-CMD ["/railway-playground"]
+CMD ["/server"]
