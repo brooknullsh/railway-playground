@@ -2,13 +2,11 @@
   "plugins": [
     "prettier-plugin-svelte",
     "prettier-plugin-tailwindcss",
-    "prettier-plugin-brace-style",
     "@trivago/prettier-plugin-sort-imports",
     "prettier-plugin-merge"
   ],
   "semi": false,
   "arrowParens": "avoid",
-  "braceStyle": "allman",
   "tailwindStylesheet": "./src/app.css",
   "overrides": [{ "files": "*.svelte", "options": { "parser": "svelte" } }]
 }

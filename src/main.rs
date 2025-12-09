@@ -25,15 +25,13 @@ use crate::handler::login;
 mod handler;
 
 #[derive(Clone)]
-struct AppState
-{
+struct AppState {
   pool: Arc<PgPool>,
   acc_secret: String,
   ref_secret: String,
 }
 
-fn setup_logging()
-{
+fn setup_logging() {
   let env_lvl = "DEBUG".to_string();
   let env_lvl = var("LOG_LEVEL").unwrap_or(env_lvl);
   let log_lvl = Level::from_str(&env_lvl).unwrap_or(Level::DEBUG);
@@ -47,15 +45,13 @@ fn setup_logging()
   info!("logging lvl: {}", log_lvl);
 }
 
-async fn create_app() -> anyhow::Result<Router>
-{
+async fn create_app() -> anyhow::Result<Router> {
   let db = var("DATABASE_URL")?;
   let acc_secret = var("ACCESS_SECRET")?;
   let ref_secret = var("REFRESH_SECRET")?;
 
   let pool = PgPoolOptions::new().connect(&db).await?;
   let pool = Arc::new(pool);
-
   let state = AppState {
     pool,
     acc_secret,
@@ -78,15 +74,13 @@ async fn create_app() -> anyhow::Result<Router>
 }
 
 #[tokio::main]
-async fn main()
-{
+async fn main() {
   setup_logging();
 
   let Ok(app) = create_app()
     .await
     .inspect_err(|err| error!("[SETUP] {err:#}"))
-  else
-  {
+  else {
     exit(1)
   };
 
@@ -97,8 +91,7 @@ async fn main()
   let Ok(listener) = TcpListener::bind(&host)
     .await
     .inspect_err(|err| error!("[SETUP] {err:#}"))
-  else
-  {
+  else {
     exit(1)
   };
 
