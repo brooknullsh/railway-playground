@@ -18,8 +18,8 @@ use tracing::error;
 use tracing::info;
 use tracing_subscriber::fmt;
 
+use crate::handler::auth::auth_middleware;
 use crate::handler::auth::login;
-use crate::handler::auth::protected;
 use crate::handler::index;
 
 mod handler;
@@ -27,8 +27,7 @@ mod handler;
 #[derive(Clone)]
 struct AppState {
   pool: Arc<PgPool>,
-  acc_secret: String,
-  ref_secret: String,
+  token_secret: String,
 }
 
 fn setup_logging() {
@@ -47,18 +46,13 @@ fn setup_logging() {
 
 async fn create_app() -> anyhow::Result<Router> {
   let db = var("DATABASE_URL")?;
-  let acc_secret = var("ACCESS_SECRET")?;
-  let ref_secret = var("REFRESH_SECRET")?;
+  let token_secret = var("TOKEN_SECRET")?;
 
   let pool = PgPoolOptions::new().connect(&db).await?;
   let pool = Arc::new(pool);
-  let state = AppState {
-    pool,
-    acc_secret,
-    ref_secret,
-  };
+  let state = AppState { pool, token_secret };
 
-  let auth_ware = from_fn_with_state(state.clone(), protected);
+  let auth_ware = from_fn_with_state(state.clone(), auth_middleware);
   let trace_lyr = TraceLayer::new_for_http();
   let cookie_lyr = CookieManagerLayer::new();
 

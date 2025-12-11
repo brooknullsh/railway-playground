@@ -8,9 +8,6 @@ use tracing::error;
 
 pub mod auth;
 
-const ACCESS_COOKIE: &str = "access_token";
-const REFRESH_COOKIE: &str = "refresh_token";
-
 pub struct HandlerError(StatusCode);
 type HandlerResult<T> = Result<T, HandlerError>;
 

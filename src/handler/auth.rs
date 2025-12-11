@@ -18,7 +18,6 @@ use jsonwebtoken::encode;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
-use sqlx::postgres::PgQueryResult;
 use sqlx::query;
 use sqlx::query_scalar;
 use tower_cookies::Cookie;
@@ -26,16 +25,12 @@ use tower_cookies::Cookies;
 use tower_cookies::cookie::time::OffsetDateTime;
 
 use crate::AppState;
-use crate::handler::ACCESS_COOKIE;
 use crate::handler::HandlerError;
 use crate::handler::HandlerResult;
-use crate::handler::REFRESH_COOKIE;
 use crate::handler::UserState;
 
-enum Token {
-  Access,
-  Refresh,
-}
+const ACC_COOKIE: &str = "acc";
+const REF_COOKIE: &str = "ref";
 
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
@@ -44,7 +39,7 @@ pub struct Claims {
 }
 
 impl Claims {
-  fn pair(id: i32) -> (Self, Self) {
+  fn pair(state: &UserState) -> (Self, Self) {
     let now = SystemTime::now();
     let acc_lifetime = Duration::from_secs(1_800); // 30m
     let ref_lifetime = Duration::from_secs(2_592_000); // 30d
@@ -58,44 +53,22 @@ impl Claims {
     };
 
     let exp = build_exp(acc_lifetime);
-    let user = UserState { id };
+    let user = state.clone();
     let acc_claims = Self { user, exp };
 
     let exp = build_exp(ref_lifetime);
-    let user = UserState { id };
+    let user = state.clone();
     let ref_claims = Self { user, exp };
 
     (acc_claims, ref_claims)
   }
 
-  fn into_token(&self, state: &AppState, token: Token) -> anyhow::Result<String> {
-    let secret = match token {
-      Token::Access => state.acc_secret.as_bytes(),
-      Token::Refresh => state.ref_secret.as_bytes(),
-    };
-
+  fn into_cookie<'l>(&self, secret: &[u8], name: &'l str) -> anyhow::Result<Cookie<'l>> {
     let header = Header::default();
     let secret = EncodingKey::from_secret(&secret);
+    let token = encode(&header, self, &secret).map_err(anyhow::Error::from)?;
 
-    encode(&header, self, &secret).map_err(anyhow::Error::from)
-  }
-
-  fn from_token(state: &AppState, token: Token, value: &str) -> anyhow::Result<Self> {
-    let secret = match token {
-      Token::Access => state.acc_secret.as_bytes(),
-      Token::Refresh => state.ref_secret.as_bytes(),
-    };
-
-    let val = Validation::default();
-    let secret = DecodingKey::from_secret(&secret);
-
-    decode(value, &secret, &val)
-      .map(|data| data.claims)
-      .map_err(anyhow::Error::from)
-  }
-
-  fn into_cookie(self, cookies: &mut Cookies, name: &'static str, value: String) {
-    let base = Cookie::new(name, value);
+    let base = Cookie::new(name, token);
     let now = OffsetDateTime::now_utc();
     let exp = OffsetDateTime::from_unix_timestamp(self.exp as i64).unwrap_or(now);
 
@@ -105,7 +78,16 @@ impl Claims {
       .expires(exp)
       .build();
 
-    cookies.add(cookie);
+    Ok(cookie)
+  }
+
+  fn from_token(secret: &[u8], value: &str) -> anyhow::Result<Self> {
+    let val = Validation::default();
+    let secret = DecodingKey::from_secret(&secret);
+
+    decode(value, &secret, &val)
+      .map(|data| data.claims)
+      .map_err(anyhow::Error::from)
   }
 }
 
@@ -115,11 +97,11 @@ pub struct LoginBody {
 }
 
 pub async fn login(
-  mut cookies: Cookies,
+  cookies: Cookies,
   State(state): State<AppState>,
   Json(body): Json<LoginBody>,
 ) -> HandlerResult<impl IntoResponse> {
-  if cookies.get(ACCESS_COOKIE).is_some() || cookies.get(REFRESH_COOKIE).is_some() {
+  if cookies.get(ACC_COOKIE).is_some() || cookies.get(REF_COOKIE).is_some() {
     return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
   }
 
@@ -127,44 +109,49 @@ pub async fn login(
     return Err(StatusCode::NOT_FOUND).map_err(HandlerError::from);
   }
 
-  create_new_tokens(&mut cookies, &state, body.id).await?;
+  let user = UserState { id: body.id };
+  let (acc_claims, ref_claims) = Claims::pair(&user);
+  let secret = state.token_secret.as_bytes();
+
+  let acc_cookie = acc_claims.into_cookie(secret, ACC_COOKIE)?;
+  let ref_cookie = ref_claims.into_cookie(secret, REF_COOKIE)?;
+  set_refresh_token_by_id(&state.pool, ref_cookie.value(), body.id).await?;
+
+  cookies.add(acc_cookie);
+  cookies.add(ref_cookie);
+
   Ok(StatusCode::OK)
 }
 
-pub async fn protected(
-  mut cookies: Cookies,
+pub async fn auth_middleware(
+  cookies: Cookies,
   State(state): State<AppState>,
   mut req: Request,
   next: Next,
 ) -> HandlerResult<impl IntoResponse> {
   let user_token = cookies
-    .get(REFRESH_COOKIE)
+    .get(REF_COOKIE)
     .ok_or(StatusCode::UNAUTHORIZED)?
     .value()
     .to_string();
 
-  let user_claims = Claims::from_token(&state, Token::Refresh, &user_token)?;
-  if cookies.get(ACCESS_COOKIE).is_none() {
-    create_new_tokens(&mut cookies, &state, user_claims.user.id).await?;
+  let secret = state.token_secret.as_bytes();
+  let Claims { user, .. } = Claims::from_token(secret, &user_token)?;
+
+  if cookies.get(ACC_COOKIE).is_none() {
+    let user = UserState { id: user.id };
+    let (acc_claims, ref_claims) = Claims::pair(&user);
+
+    let acc_cookie = acc_claims.into_cookie(secret, ACC_COOKIE)?;
+    let ref_cookie = ref_claims.into_cookie(secret, REF_COOKIE)?;
+    set_refresh_token_by_id(&state.pool, ref_cookie.value(), user.id).await?;
+
+    cookies.add(acc_cookie);
+    cookies.add(ref_cookie);
   }
 
-  req.extensions_mut().insert(user_claims.user);
+  req.extensions_mut().insert(user);
   Ok(next.run(req).await)
-}
-
-async fn create_new_tokens(
-  mut cookies: &mut Cookies,
-  state: &AppState,
-  id: i32,
-) -> HandlerResult<()> {
-  let (acc_claims, ref_claims) = Claims::pair(id);
-  let acc_token = acc_claims.into_token(&state, Token::Access)?;
-  let ref_token = ref_claims.into_token(&state, Token::Refresh)?;
-
-  set_refresh_token_by_id(&state.pool, &ref_token, id).await?;
-  acc_claims.into_cookie(&mut cookies, ACCESS_COOKIE, acc_token);
-  ref_claims.into_cookie(&mut cookies, REFRESH_COOKIE, ref_token);
-  Ok(())
 }
 
 async fn user_exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
@@ -182,11 +169,7 @@ async fn user_exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
     .map_err(HandlerError::from)
 }
 
-async fn set_refresh_token_by_id(
-  pool: &PgPool,
-  token: &str,
-  id: i32,
-) -> HandlerResult<PgQueryResult> {
+async fn set_refresh_token_by_id(pool: &PgPool, token: &str, id: i32) -> HandlerResult<bool> {
   let stmt = r#"
   UPDATE users
   SET refresh_token = $1
@@ -199,6 +182,7 @@ async fn set_refresh_token_by_id(
     .execute(pool)
     .await
     .map_err(HandlerError::from)
+    .map(|res| res.rows_affected() == 1)
 }
 
 #[cfg(test)]
@@ -224,8 +208,8 @@ mod tests {
   }
 
   fn assert_cookies(res: &TestResponse, exists: bool) {
-    let acc_cookie = res.maybe_cookie(ACCESS_COOKIE);
-    let ref_cookie = res.maybe_cookie(REFRESH_COOKIE);
+    let acc_cookie = res.maybe_cookie(ACC_COOKIE);
+    let ref_cookie = res.maybe_cookie(REF_COOKIE);
 
     assert_eq!(acc_cookie.is_some(), exists);
     assert_eq!(ref_cookie.is_some(), exists);
@@ -288,7 +272,7 @@ mod tests {
     let body = json!({ "id": 1 });
 
     let res = server.post("/login").json(&body).await;
-    let ref_cookie = res.cookie(REFRESH_COOKIE);
+    let ref_cookie = res.cookie(REF_COOKIE);
     let res = server.get("/").add_cookie(ref_cookie).save_cookies().await;
 
     assert_cookies(&res, true);
@@ -301,7 +285,7 @@ mod tests {
     let body = json!({ "id": 1 });
 
     let res = server.post("/login").json(&body).await;
-    res.cookies().force_remove(REFRESH_COOKIE);
+    res.cookies().force_remove(REF_COOKIE);
     let res = server.get("/").expect_failure().await;
 
     assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
