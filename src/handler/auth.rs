@@ -3,6 +3,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use anyhow::Result;
 use axum::Json;
 use axum::extract::Request;
 use axum::extract::State;
@@ -32,6 +33,72 @@ use crate::handler::UserState;
 const ACC_COOKIE: &str = "acc";
 const REF_COOKIE: &str = "ref";
 
+struct UserBuffer {
+  acc_claims: Claims,
+  ref_claims: Claims,
+  acc_token: String,
+  ref_token: String,
+}
+
+impl UserBuffer {
+  fn new(user: &UserState, secret: &[u8]) -> Result<Self> {
+    let now = SystemTime::now();
+    let acc_lifetime = Duration::from_secs(1_800); // 30m
+    let ref_lifetime = Duration::from_secs(2_592_000); // 30d
+
+    let claim_builder = |lifetime: Duration| -> Claims {
+      let exp = now
+        .add(lifetime)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+
+      let user = user.clone();
+      Claims { exp, user }
+    };
+
+    let acc_claims = claim_builder(acc_lifetime);
+    let ref_claims = claim_builder(ref_lifetime);
+
+    let token_builder = |claims: &Claims| -> Result<String> {
+      let header = Header::default();
+      let secret = EncodingKey::from_secret(&secret);
+
+      encode(&header, claims, &secret).map_err(anyhow::Error::from)
+    };
+
+    let acc_token = token_builder(&acc_claims)?;
+    let ref_token = token_builder(&ref_claims)?;
+
+    Ok(Self {
+      acc_claims,
+      ref_claims,
+      acc_token,
+      ref_token,
+    })
+  }
+
+  fn set_cookies(self, cookies: &mut Cookies) {
+    let cookie_builder = |name: &'static str, value: String, exp: u64| -> Cookie {
+      let base = Cookie::new(name, value);
+      let now = OffsetDateTime::now_utc();
+      let exp = OffsetDateTime::from_unix_timestamp(exp as i64).unwrap_or(now);
+
+      Cookie::build(base)
+        .http_only(true)
+        .secure(true)
+        .expires(exp)
+        .build()
+    };
+
+    let acc_cookie = cookie_builder(ACC_COOKIE, self.acc_token, self.acc_claims.exp);
+    let ref_cookie = cookie_builder(REF_COOKIE, self.ref_token, self.ref_claims.exp);
+
+    cookies.add(acc_cookie);
+    cookies.add(ref_cookie);
+  }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
   exp: u64,
@@ -39,53 +106,11 @@ pub struct Claims {
 }
 
 impl Claims {
-  fn pair(state: &UserState) -> (Self, Self) {
-    let now = SystemTime::now();
-    let acc_lifetime = Duration::from_secs(1_800); // 30m
-    let ref_lifetime = Duration::from_secs(2_592_000); // 30d
-
-    let build_exp = |lifetime: Duration| {
-      now
-        .add(lifetime)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
-    };
-
-    let exp = build_exp(acc_lifetime);
-    let user = state.clone();
-    let acc_claims = Self { user, exp };
-
-    let exp = build_exp(ref_lifetime);
-    let user = state.clone();
-    let ref_claims = Self { user, exp };
-
-    (acc_claims, ref_claims)
-  }
-
-  fn into_cookie<'l>(&self, secret: &[u8], name: &'l str) -> anyhow::Result<Cookie<'l>> {
-    let header = Header::default();
-    let secret = EncodingKey::from_secret(&secret);
-    let token = encode(&header, self, &secret).map_err(anyhow::Error::from)?;
-
-    let base = Cookie::new(name, token);
-    let now = OffsetDateTime::now_utc();
-    let exp = OffsetDateTime::from_unix_timestamp(self.exp as i64).unwrap_or(now);
-
-    let cookie = Cookie::build(base)
-      .http_only(true)
-      .secure(true)
-      .expires(exp)
-      .build();
-
-    Ok(cookie)
-  }
-
-  fn from_token(secret: &[u8], value: &str) -> anyhow::Result<Self> {
-    let val = Validation::default();
+  fn from_token(secret: &[u8], value: &str) -> Result<Self> {
+    let validator = Validation::default();
     let secret = DecodingKey::from_secret(&secret);
 
-    decode(value, &secret, &val)
+    decode(value, &secret, &validator)
       .map(|data| data.claims)
       .map_err(anyhow::Error::from)
   }
@@ -97,57 +122,47 @@ pub struct LoginBody {
 }
 
 pub async fn login(
-  cookies: Cookies,
+  mut cookies: Cookies,
   State(state): State<AppState>,
   Json(body): Json<LoginBody>,
 ) -> HandlerResult<impl IntoResponse> {
   if cookies.get(ACC_COOKIE).is_some() || cookies.get(REF_COOKIE).is_some() {
     return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
-  }
-
-  if !user_exists_by_id(&state.pool, body.id).await? {
+  } else if !user_exists_by_id(&state.pool, body.id).await? {
     return Err(StatusCode::NOT_FOUND).map_err(HandlerError::from);
   }
 
-  let user = UserState { id: body.id };
-  let (acc_claims, ref_claims) = Claims::pair(&user);
   let secret = state.token_secret.as_bytes();
+  let user = UserState { id: body.id };
+  let user = UserBuffer::new(&user, secret)?;
 
-  let acc_cookie = acc_claims.into_cookie(secret, ACC_COOKIE)?;
-  let ref_cookie = ref_claims.into_cookie(secret, REF_COOKIE)?;
-  set_refresh_token_by_id(&state.pool, ref_cookie.value(), body.id).await?;
+  set_refresh_token_by_id(&state.pool, &user.ref_token, body.id).await?;
 
-  cookies.add(acc_cookie);
-  cookies.add(ref_cookie);
-
+  user.set_cookies(&mut cookies);
   Ok(StatusCode::OK)
 }
 
 pub async fn auth_middleware(
-  cookies: Cookies,
+  mut cookies: Cookies,
   State(state): State<AppState>,
   mut req: Request,
   next: Next,
 ) -> HandlerResult<impl IntoResponse> {
-  let user_token = cookies
+  let token = cookies
     .get(REF_COOKIE)
     .ok_or(StatusCode::UNAUTHORIZED)?
     .value()
     .to_string();
 
   let secret = state.token_secret.as_bytes();
-  let Claims { user, .. } = Claims::from_token(secret, &user_token)?;
+  let claims = Claims::from_token(secret, &token)?;
 
+  let user = UserState { id: claims.user.id };
   if cookies.get(ACC_COOKIE).is_none() {
-    let user = UserState { id: user.id };
-    let (acc_claims, ref_claims) = Claims::pair(&user);
+    let user = UserBuffer::new(&user, secret)?;
+    set_refresh_token_by_id(&state.pool, &user.ref_token, claims.user.id).await?;
 
-    let acc_cookie = acc_claims.into_cookie(secret, ACC_COOKIE)?;
-    let ref_cookie = ref_claims.into_cookie(secret, REF_COOKIE)?;
-    set_refresh_token_by_id(&state.pool, ref_cookie.value(), user.id).await?;
-
-    cookies.add(acc_cookie);
-    cookies.add(ref_cookie);
+    user.set_cookies(&mut cookies);
   }
 
   req.extensions_mut().insert(user);
