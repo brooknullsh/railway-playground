@@ -41,7 +41,7 @@ fn setup_logging() {
     .compact()
     .init();
 
-  info!("logging lvl: {}", log_lvl);
+  info!("logging lvl: {log_lvl}");
 }
 
 async fn create_app() -> anyhow::Result<Router> {

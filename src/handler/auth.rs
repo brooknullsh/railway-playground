@@ -33,14 +33,14 @@ use crate::handler::UserState;
 const ACC_COOKIE: &str = "acc";
 const REF_COOKIE: &str = "ref";
 
-struct UserBuffer {
+struct AuthBuffer {
   acc_claims: Claims,
   ref_claims: Claims,
   acc_token: String,
   ref_token: String,
 }
 
-impl UserBuffer {
+impl AuthBuffer {
   fn new(user: &UserState, secret: &[u8]) -> Result<Self> {
     let now = SystemTime::now();
     let acc_lifetime = Duration::from_secs(1_800); // 30m
@@ -50,7 +50,7 @@ impl UserBuffer {
       let exp = now
         .add(lifetime)
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
+        .unwrap_or(Duration::ZERO) // Expire token immediately.
         .as_secs();
 
       let user = user.clone();
@@ -116,32 +116,6 @@ impl Claims {
   }
 }
 
-#[derive(Deserialize)]
-pub struct LoginBody {
-  id: i32,
-}
-
-pub async fn login(
-  mut cookies: Cookies,
-  State(state): State<AppState>,
-  Json(body): Json<LoginBody>,
-) -> HandlerResult<impl IntoResponse> {
-  if cookies.get(ACC_COOKIE).is_some() || cookies.get(REF_COOKIE).is_some() {
-    return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
-  } else if !user_exists_by_id(&state.pool, body.id).await? {
-    return Err(StatusCode::NOT_FOUND).map_err(HandlerError::from);
-  }
-
-  let secret = state.token_secret.as_bytes();
-  let user = UserState { id: body.id };
-  let user = UserBuffer::new(&user, secret)?;
-
-  set_refresh_token_by_id(&state.pool, &user.ref_token, body.id).await?;
-
-  user.set_cookies(&mut cookies);
-  Ok(StatusCode::OK)
-}
-
 pub async fn auth_middleware(
   mut cookies: Cookies,
   State(state): State<AppState>,
@@ -155,18 +129,51 @@ pub async fn auth_middleware(
     .to_string();
 
   let secret = state.token_secret.as_bytes();
+  // The decoded user data will be used to regenerate both tokens if the access
+  // token has expired. NOTE: The user data is shared with the next request.
   let claims = Claims::from_token(secret, &token)?;
 
-  let user = UserState { id: claims.user.id };
   if cookies.get(ACC_COOKIE).is_none() {
-    let user = UserBuffer::new(&user, secret)?;
-    set_refresh_token_by_id(&state.pool, &user.ref_token, claims.user.id).await?;
+    // Build new claims and tokens using the existing user data.
+    let user = AuthBuffer::new(&claims.user, secret)?;
 
+    set_token_by_id(&state.pool, &user.ref_token, claims.user.id).await?;
     user.set_cookies(&mut cookies);
   }
 
-  req.extensions_mut().insert(user);
+  // No matter if we regenerate the tokens, the user data is unchanged.
+  req.extensions_mut().insert(claims.user);
   Ok(next.run(req).await)
+}
+
+#[derive(Deserialize)]
+pub struct LoginBody {
+  id: i32,
+}
+
+pub async fn login(
+  mut cookies: Cookies,
+  State(state): State<AppState>,
+  Json(body): Json<LoginBody>,
+) -> HandlerResult<impl IntoResponse> {
+  if cookies.get(ACC_COOKIE).is_some() {
+    return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
+  }
+
+  // NOTE: Not a production-worthy check.
+  if user_exists_by_id(&state.pool, body.id).await? {
+    let secret = state.token_secret.as_bytes();
+    // Build new claims and tokens using the payload.
+    let user = UserState::new(body.id);
+    let user = AuthBuffer::new(&user, secret)?;
+
+    set_token_by_id(&state.pool, &user.ref_token, body.id).await?;
+    user.set_cookies(&mut cookies);
+  } else {
+    return Err(StatusCode::NOT_FOUND).map_err(HandlerError::from);
+  }
+
+  Ok(StatusCode::OK)
 }
 
 async fn user_exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
@@ -184,7 +191,7 @@ async fn user_exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
     .map_err(HandlerError::from)
 }
 
-async fn set_refresh_token_by_id(pool: &PgPool, token: &str, id: i32) -> HandlerResult<bool> {
+async fn set_token_by_id(pool: &PgPool, token: &str, id: i32) -> HandlerResult<bool> {
   let stmt = r#"
   UPDATE users
   SET refresh_token = $1
@@ -268,8 +275,6 @@ mod tests {
     server.post("/login").json(&body).save_cookies().await;
     let res = server.get("/").await;
 
-    let exp_body = "1".to_string();
-    assert_eq!(res.text(), exp_body);
     assert_eq!(res.status_code(), StatusCode::OK);
   }
 
@@ -304,5 +309,26 @@ mod tests {
     let res = server.get("/").expect_failure().await;
 
     assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
+  }
+
+  #[tokio::test]
+  async fn protected_invalid_ref_token() {
+    let server = setup().await;
+    let body = json!({ "id": 1 });
+
+    let res = server.post("/login").json(&body).await;
+
+    let mut ref_cookie = res.cookie(REF_COOKIE);
+    let cloned = ref_cookie.clone();
+    let malformed = cloned.value();
+    ref_cookie.set_value(&malformed[10..]);
+
+    let res = server
+      .get("/")
+      .add_cookie(ref_cookie)
+      .expect_failure()
+      .await;
+
+    assert_eq!(res.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
   }
 }

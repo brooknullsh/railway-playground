@@ -12,15 +12,11 @@ pub struct HandlerError(StatusCode);
 type HandlerResult<T> = Result<T, HandlerError>;
 
 impl IntoResponse for HandlerError {
-  fn into_response(self) -> Response {
-    self.0.into_response()
-  }
+  fn into_response(self) -> Response { self.0.into_response() }
 }
 
 impl From<StatusCode> for HandlerError {
-  fn from(code: StatusCode) -> Self {
-    Self(code)
-  }
+  fn from(code: StatusCode) -> Self { Self(code) }
 }
 
 impl From<sqlx::Error> for HandlerError {
@@ -42,7 +38,12 @@ pub struct UserState {
   id: i32,
 }
 
+impl UserState {
+  fn new(id: i32) -> Self { Self { id } }
+}
+
 pub async fn index(Extension(user): Extension<UserState>) -> HandlerResult<impl IntoResponse> {
-  let user_id = user.id.to_string();
-  Ok(user_id)
+  let id = user.id.to_string();
+
+  Ok(id)
 }

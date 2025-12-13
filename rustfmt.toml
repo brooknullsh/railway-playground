@@ -1,3 +1,4 @@
 tab_spaces = 2
 imports_granularity = "Item"
 use_field_init_shorthand = true
+fn_single_line = true
