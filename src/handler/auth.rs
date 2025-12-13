@@ -33,72 +33,6 @@ use crate::handler::UserState;
 const ACC_COOKIE: &str = "acc";
 const REF_COOKIE: &str = "ref";
 
-struct AuthBuffer {
-  acc_claims: Claims,
-  ref_claims: Claims,
-  acc_token: String,
-  ref_token: String,
-}
-
-impl AuthBuffer {
-  fn new(user: &UserState, secret: &[u8]) -> Result<Self> {
-    let now = SystemTime::now();
-    let acc_lifetime = Duration::from_secs(1_800); // 30m
-    let ref_lifetime = Duration::from_secs(2_592_000); // 30d
-
-    let claim_builder = |lifetime: Duration| -> Claims {
-      let exp = now
-        .add(lifetime)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO) // Expire token immediately.
-        .as_secs();
-
-      let user = user.clone();
-      Claims { exp, user }
-    };
-
-    let acc_claims = claim_builder(acc_lifetime);
-    let ref_claims = claim_builder(ref_lifetime);
-
-    let token_builder = |claims: &Claims| -> Result<String> {
-      let header = Header::default();
-      let secret = EncodingKey::from_secret(&secret);
-
-      encode(&header, claims, &secret).map_err(anyhow::Error::from)
-    };
-
-    let acc_token = token_builder(&acc_claims)?;
-    let ref_token = token_builder(&ref_claims)?;
-
-    Ok(Self {
-      acc_claims,
-      ref_claims,
-      acc_token,
-      ref_token,
-    })
-  }
-
-  fn set_cookies(self, cookies: &mut Cookies) {
-    let cookie_builder = |name: &'static str, value: String, exp: u64| -> Cookie {
-      let base = Cookie::new(name, value);
-      let now = OffsetDateTime::now_utc();
-      let exp = OffsetDateTime::from_unix_timestamp(exp as i64).unwrap_or(now);
-
-      Cookie::build(base)
-        .http_only(true)
-        .secure(true)
-        .expires(exp)
-        .build()
-    };
-
-    let acc_cookie = cookie_builder(ACC_COOKIE, self.acc_token, self.acc_claims.exp);
-    let ref_cookie = cookie_builder(REF_COOKIE, self.ref_token, self.ref_claims.exp);
-
-    cookies.add(acc_cookie);
-    cookies.add(ref_cookie);
-  }
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
   exp: u64,
@@ -106,6 +40,33 @@ pub struct Claims {
 }
 
 impl Claims {
+  fn new_pair(user: &UserState) -> (Self, Self) {
+    let now = SystemTime::now();
+
+    let builder = |lifetime: Duration| -> Claims {
+      let user = user.clone();
+      let exp = now
+        .add(lifetime)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+
+      Claims { exp, user }
+    };
+
+    let acc_lifetime = Duration::from_secs(1_800); // 30m
+    let ref_lifetime = Duration::from_secs(2_592_000); // 30d
+
+    (builder(acc_lifetime), builder(ref_lifetime))
+  }
+
+  fn into_token(&self, secret: &[u8]) -> Result<String> {
+    let header = Header::default();
+    let secret = EncodingKey::from_secret(&secret);
+
+    encode(&header, self, &secret).map_err(anyhow::Error::from)
+  }
+
   fn from_token(secret: &[u8], value: &str) -> Result<Self> {
     let validator = Validation::default();
     let secret = DecodingKey::from_secret(&secret);
@@ -113,6 +74,20 @@ impl Claims {
     decode(value, &secret, &validator)
       .map(|data| data.claims)
       .map_err(anyhow::Error::from)
+  }
+
+  fn set_cookie(&self, cookies: &mut Cookies, name: &'static str, value: String) {
+    let base = Cookie::new(name, value);
+    let now = OffsetDateTime::now_utc();
+    let exp = OffsetDateTime::from_unix_timestamp(self.exp as i64).unwrap_or(now);
+
+    let cookie = Cookie::build(base)
+      .http_only(true)
+      .secure(true)
+      .expires(exp)
+      .build();
+
+    cookies.add(cookie);
   }
 }
 
@@ -129,19 +104,19 @@ pub async fn auth_middleware(
     .to_string();
 
   let secret = state.token_secret.as_bytes();
-  // The decoded user data will be used to regenerate both tokens if the access
-  // token has expired. NOTE: The user data is shared with the next request.
   let claims = Claims::from_token(secret, &token)?;
 
   if cookies.get(ACC_COOKIE).is_none() {
-    // Build new claims and tokens using the existing user data.
-    let user = AuthBuffer::new(&claims.user, secret)?;
+    let (acc_claims, ref_claims) = Claims::new_pair(&claims.user);
 
-    set_token_by_id(&state.pool, &user.ref_token, claims.user.id).await?;
-    user.set_cookies(&mut cookies);
+    let acc_token = acc_claims.into_token(secret)?;
+    let ref_token = ref_claims.into_token(secret)?;
+
+    set_token_by_id(&state.pool, &ref_token, claims.user.id).await?;
+    acc_claims.set_cookie(&mut cookies, ACC_COOKIE, acc_token);
+    ref_claims.set_cookie(&mut cookies, REF_COOKIE, ref_token);
   }
 
-  // No matter if we regenerate the tokens, the user data is unchanged.
   req.extensions_mut().insert(claims.user);
   Ok(next.run(req).await)
 }
@@ -160,15 +135,18 @@ pub async fn login(
     return Err(StatusCode::NO_CONTENT).map_err(HandlerError::from);
   }
 
-  // NOTE: Not a production-worthy check.
-  if user_exists_by_id(&state.pool, body.id).await? {
+  if exists_by_id(&state.pool, body.id).await? {
     let secret = state.token_secret.as_bytes();
-    // Build new claims and tokens using the payload.
-    let user = UserState::new(body.id);
-    let user = AuthBuffer::new(&user, secret)?;
 
-    set_token_by_id(&state.pool, &user.ref_token, body.id).await?;
-    user.set_cookies(&mut cookies);
+    let user = UserState::new(body.id);
+    let (acc_claims, ref_claims) = Claims::new_pair(&user);
+
+    let acc_token = acc_claims.into_token(secret)?;
+    let ref_token = ref_claims.into_token(secret)?;
+
+    set_token_by_id(&state.pool, &ref_token, body.id).await?;
+    acc_claims.set_cookie(&mut cookies, ACC_COOKIE, acc_token);
+    ref_claims.set_cookie(&mut cookies, REF_COOKIE, ref_token);
   } else {
     return Err(StatusCode::NOT_FOUND).map_err(HandlerError::from);
   }
@@ -176,7 +154,7 @@ pub async fn login(
   Ok(StatusCode::OK)
 }
 
-async fn user_exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
+async fn exists_by_id(pool: &PgPool, id: i32) -> HandlerResult<bool> {
   let stmt = r#"
   SELECT EXISTS (
     SELECT 1 FROM users
