@@ -27,8 +27,8 @@ func (this *Handler) Index(ctx fiber.Ctx) error {
 }
 
 func Setup(app *fiber.App, store *store.Store) {
-  var root Handler
-  root.store = store
+  var handler Handler
+  handler.store = store
 
   secret := os.Getenv("SECRET")
   if secret == "" {
@@ -37,5 +37,5 @@ func Setup(app *fiber.App, store *store.Store) {
   }
 
   app.State().Set(SECRET_KEY, secret)
-  app.Get("/", root.Index)
+  app.Get("/", handler.Index)
 }
