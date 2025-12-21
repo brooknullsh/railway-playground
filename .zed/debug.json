@@ -1,0 +1,11 @@
+[
+  {
+    "mode": "remote",
+    "adapter": "Delve",
+    "request": "attach",
+    "stopOnEntry": false,
+    "label": "Remote :2345",
+    "tcp_connection": { "host": "127.0.0.1", "port": 2345 },
+    "substitutePath": [{ "from": "${ZED_WORKTREE_ROOT}", "to": "/app" }],
+  },
+]

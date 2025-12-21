@@ -20,14 +20,16 @@ services:
       dockerfile: docker/server.Dockerfile
     ports:
       - 8080:8080
+      - 2345:2345 # Delve debugger.
     environment:
       - DATABASE_URL=postgres://admin:password@database:5432/playground
-      - TOKEN_SECRET=secret
+      - SECRET=secret
     volumes:
-      # Source files for hot-reloading.
-      - ../Cargo.lock:/app/Cargo.lock
-      - ../Cargo.toml:/app/Cargo.toml
-      - ../src:/app/src
+      - ./setup/air.toml:/setup/air.toml # Hot-reloading configuration.
+      - ../go.mod:/app/go.mod
+      - ../go.sum:/app/go.sum
+      - ../main.go:/app/main.go
+      - ../internal:/app/internal
 
   client:
     restart: on-failure
@@ -38,11 +40,9 @@ services:
       dockerfile: docker/client.Dockerfile
     ports:
       - 3000:3000
-      - 24678:24678
+      - 24678:24678 # Vite HMR server.
     environment:
       - SERVER_URL=http://server:8080
     volumes:
-      # Source files for hot-reloading.
-      # NOTE: Generated types are shared within the .svelte-kit folder.
-      - ../client/.svelte-kit:/app/.svelte-kit
+      - ../client/.svelte-kit:/app/.svelte-kit # NOTE: Generated types are shared within here.
       - ../client/src:/app/src

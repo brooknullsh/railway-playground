@@ -1,0 +1,8 @@
+[build]
+# Build a debug-specific binary.
+# For all packages:
+# -N => Disable optimisations
+# -l => Disable inlining
+cmd = "go build -gcflags='all=-N -l' -o ./bin/main"
+# Open a debugger for remote connection.
+full_bin = "dlv exec --listen :2345 --continue --headless --api-version=2 --accept-multiclient ./bin/main"

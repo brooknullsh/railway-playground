@@ -1,11 +1,11 @@
-FROM rust:alpine
+FROM golang:alpine AS builder
 WORKDIR /app
 
-RUN apk add --no-cache musl-dev
+COPY go.mod go.sum main.go ./
+COPY internal/             ./internal
 
-COPY Cargo* .
-COPY src    ./src
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+RUN go install github.com/air-verse/air@latest
+RUN go mod download
 
-RUN cargo install cargo-watch
-
-CMD ["cargo", "watch", "-x", "run"]
+CMD ["air", "-c", "../setup/air.toml"]
